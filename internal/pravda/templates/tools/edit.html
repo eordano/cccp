@@ -1,0 +1,17 @@
+{{ define "tool-Edit" }}
+{{ $fp := field . "file_path" }}
+{{ $old := field . "old_string" }}
+{{ $new := field . "new_string" }}
+<details>
+  <summary>
+    <div class="content-title">{{ basename $fp }}</div>
+    <div class="content-preview"><span class="diff-add">+{{ lineCount $new }}</span> <span class="diff-del">-{{ lineCount $old }}</span> lines</div>
+  </summary>
+  <div class="content-details">
+    <div class="diff-minus-label">- Old</div>
+    <pre class="diff-minus selectable">{{ $old }}</pre>
+    <div class="diff-plus-label">+ New</div>
+    <pre class="diff-plus selectable">{{ $new }}</pre>
+  </div>
+</details>
+{{ end }}

@@ -1,0 +1,11 @@
+{{ define "event-agent-result" }}
+<div class="content-title">{{ if .Summary }}{{ .Summary }}{{ else }}Agent completed{{ end }} {{ if .AgentID }}<code class="agent-id">{{ .AgentID }}</code>{{ end }}</div>
+<div class="content-preview">status: {{ if .Status }}{{ .Status }}{{ else }}unknown{{ end }}</div>
+{{ if .Result }}
+<details class="agent-section">
+  <summary class="agent-section-toggle">Result</summary>
+  <div class="agent-result-body">{{ markdown .Result }}</div>
+</details>
+{{ end }}
+{{ if .OutputFile }}<div class="dim" style="margin-top:0.3rem">Output file: <code>{{ .OutputFile }}</code></div>{{ end }}
+{{ end }}

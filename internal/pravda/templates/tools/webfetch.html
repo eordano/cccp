@@ -1,0 +1,15 @@
+{{ define "tool-WebFetch" }}
+{{ $url := field . "url" }}
+{{ $prompt := field . "prompt" }}
+{{ $result := resultText .ResultContent }}
+<details>
+  <summary>
+    <div class="content-title">{{ $url }}</div>
+    <div class="content-preview">{{ truncate $prompt 100 }}</div>
+  </summary>
+  <div class="content-details">
+    <div class="dim">Prompt</div><pre class="selectable">{{ $prompt }}</pre>
+    <div class="dim">Result</div><pre class="selectable">{{ if $result }}{{ $result }}{{ else }}No content{{ end }}</pre>
+  </div>
+</details>
+{{ end }}

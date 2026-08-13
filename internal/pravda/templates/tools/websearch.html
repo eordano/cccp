@@ -1,0 +1,10 @@
+{{ define "tool-WebSearch" }}
+{{ $q := field . "query" }}
+<details>
+  <summary>
+    <div class="content-title">{{ $q }}</div>
+    <div class="content-preview">Web search</div>
+  </summary>
+  <pre class="content-details selectable" style="max-height:30em">{{ resultText .ResultContent }}</pre>
+</details>
+{{ end }}

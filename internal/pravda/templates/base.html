@@ -1,0 +1,201 @@
+{{ define "base.html" }}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ .Title }}</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/htmx.min.js" defer></script>
+  <script src="/htmx-ws.js" defer></script>
+  <script src="/pravda.js" defer></script>
+</head>
+<body class="{{range .HiddenKinds}}hide-{{ . | kindClass }} {{end}}" hx-boost="true" hx-history="false">
+  <div class="app-container">
+    {{ template "sidebar" . }}
+    <main class="main-content">
+      {{ template "main-content" . }}
+    </main>
+  </div>
+</body>
+</html>{{ end }}
+
+{{ define "main-content" }}
+{{ if .Inspector }}
+  {{ template "inspector" .Inspector }}
+{{ else if .Session }}
+  {{ template "session-header" . }}
+  {{ template "timeline" .Session }}
+  {{ template "live-connect" . }}
+{{ else }}
+  <header class="header">
+    <div class="header-session">
+      <div class="session-title">Sessions</div>
+    </div>
+    <nav class="header-actions">{{ template "filter-menu" . }}{{ template "settings-menu" . }}</nav>
+  </header>
+  <div class="timeline-wrap">
+    <div class="welcome-search">
+      <input type="search" class="search-input search-main-input"
+             placeholder="Search conversations..." autofocus
+             value="{{ .SearchQuery }}"
+             autocomplete="off" spellcheck="false">
+      <div class="welcome-sessions">
+        {{ $current := .CurrentPath }}
+        {{ range .FlatList }}{{ template "flat-row" (dict "item" . "current" $current) }}{{ end }}
+      </div>
+    </div>
+  </div>
+{{ end }}
+{{ end }}
+
+{{ define "session-header" }}
+<header class="header">
+  <div class="header-session">
+    <div class="session-title">{{ if .SessionFile.Title }}{{ .SessionFile.Title }}{{ else }}{{ shortID .SessionFile.Name }}{{ end }}</div>
+    <div class="session-sub">
+      <span id="session-metadata">{{ .Session.Metadata }}</span>
+    </div>
+  </div>
+  <nav class="header-actions">
+    {{ template "filter-menu" . }}
+    {{ template "settings-menu" . }}
+  </nav>
+</header>
+{{ end }}
+
+{{ define "settings-menu" }}
+<details class="settings-menu header-menu">
+  <summary class="icon-btn" title="Settings" aria-label="Settings">
+    <span aria-hidden="true">⚙</span>
+  </summary>
+  <div class="settings-panel">
+    {{ template "toggle-form" (dict "action" "/settings/jump-lines" "label" "Jump to newest on live updates" "on" .JumpLines) }}
+    {{ template "toggle-form" (dict "action" "/settings/jump-file" "label" "Jump to newest file when it appears" "on" .JumpFile) }}
+  </div>
+</details>
+{{ end }}
+
+{{ define "toggle-form" }}
+<form method="post" action="{{ .action }}" class="toggle-form">
+  <input type="hidden" name="on" value="{{ if .on }}0{{ else }}1{{ end }}">
+  <label class="filter-item">
+    <input type="checkbox" class="auto-submit" {{ if .on }}checked{{ end }}>
+    <span>{{ .label }}</span>
+  </label>
+  <noscript><button class="btn" type="submit">toggle</button></noscript>
+</form>
+{{ end }}
+
+{{ define "filter-menu" }}
+{{ $hidden := .HiddenKinds }}
+<details class="filters-menu header-menu">
+  <summary class="icon-btn" title="Filter events" aria-label="Filter events">
+    <span aria-hidden="true">🎛</span>
+    {{ if $hidden }}<span class="filters-count">· {{ len $hidden }} hidden</span>{{ end }}
+  </summary>
+  <div class="filters-panel">
+    <div class="filters-actions">
+      <form method="post" action="/settings/filter-clear" style="display:inline">
+        <button class="btn" type="submit">Show all</button>
+      </form>
+      <form method="post" action="/settings/filter-reset" style="display:inline">
+        <button class="btn" type="submit">Reset defaults</button>
+      </form>
+    </div>
+    {{ range $group := (filterGroups $hidden) }}
+    <div class="filters-group">{{ $group.Label }}</div>
+    {{ range $kind := $group.Kinds }}
+    <form method="post" action="/settings/filter" class="filter-item-form">
+      <input type="hidden" name="kind" value="{{ $kind.Key }}">
+      <label class="filter-item">
+        <input type="checkbox" name="visible" class="auto-submit" {{ if not $kind.Hidden }}checked{{ end }}>
+        <span>{{ $kind.Label }}</span>
+      </label>
+      <noscript><button class="btn" type="submit" style="padding:0.1rem 0.4rem;font-size:var(--text-xs)">toggle</button></noscript>
+    </form>
+    {{ end }}
+    {{ end }}
+  </div>
+</details>
+{{ end }}
+
+{{ define "timeline" }}
+<div class="timeline-wrap">
+  <div class="timeline" id="timeline-root">
+    {{ range .Entries }}{{ template "entry" . }}{{ end }}
+  </div>
+  <button class="scroll-chip" type="button" aria-label="Jump to newest">
+    <span aria-hidden="true">↓</span> newest
+  </button>
+</div>
+{{ end }}
+
+{{ define "live-connect" }}
+{{ if .SessionFile }}<div hx-ext="ws" ws-connect="/ws/live/{{ .SessionFile.Path }}" style="display:none"></div>{{ end }}
+{{ end }}
+
+{{ define "entry" }}<article{{ if .Index }} id="e-{{.Index}}"{{ end }} class="event" data-kind="{{.Kind}}"{{ if eq .Kind "attachment" }} data-subtype="{{.Subtype}}"{{ end }}{{ if .ID }} data-tool-use-id="{{.ID}}"{{ end }}><div class="operation {{.OpClass}}"><span class="icon">{{.Icon}}</span> {{.Label}}{{ if and (eq .Kind "tool") .HasResult }} <span class="status status-{{ if .IsError }}error{{ else }}success{{ end }}">{{ if .IsError }}❌{{ else }}✅{{ end }}</span>{{ end }}</div>{{ if .Index }}<a class="time" href="?event={{.Index}}">{{ formatClock .TS }}</a>{{ else }}<span class="time">{{ formatClock .TS }}</span>{{ end }}<div class="content">{{ renderEntry . }}</div></article>{{ end }}
+
+{{ define "sidebar" }}
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <div class="brand">
+      <span class="brand-logo" aria-hidden="true">⚡</span>
+      <div class="brand-text">
+        <div class="brand-title">pravda</div>
+        <div class="brand-sub">session viewer</div>
+      </div>
+    </div>
+  </div>
+  <div class="sidebar-search-wrap">
+    <input type="search" class="search-input sidebar-search-input"
+           placeholder="Filter sessions..."
+           autocomplete="off" spellcheck="false">
+  </div>
+  <div class="file-list">
+    {{ $current := .CurrentPath }}
+    {{ range .FlatList }}{{ template "flat-row" (dict "item" . "current" $current) }}{{ end }}
+  </div>
+</aside>
+{{ end }}
+
+{{ define "subagent-entries" }}
+{{ if .Entries }}
+{{ range .Entries }}{{ template "entry" . }}{{ end }}
+{{ else }}
+<div class="dim" style="padding:0.4rem 0">No events</div>
+{{ end }}
+{{ end }}
+
+{{ define "flat-row" }}
+{{ $item := .item }}{{ $current := .current }}
+<div class="session-wrap{{ if eq $item.File.Path $current }} active-wrap{{ end }}"
+     data-search="{{ $item.File.Title }} {{ $item.Folder }} {{ $item.File.Path }}">
+  <a class="file-item session{{ if eq $item.File.Path $current }} active{{ end }}"
+     href="/session/{{ $item.File.Path }}"
+     title="{{ $item.File.Path }}">
+    <div class="file-title">{{ if $item.File.Title }}{{ $item.File.Title }}{{ else }}{{ shortID $item.File.Name }}...{{ end }}</div>
+    <div class="file-meta">
+      <span class="file-folder">{{ $item.Folder }}</span>
+      <span>{{ formatStamp $item.File.Modified }}</span>
+    </div>
+  </a>
+  {{ if $item.Agents }}
+  <details class="session-agents" open>
+    <summary class="agents-toggle">{{ len $item.Agents }} agent{{ if gt (len $item.Agents) 1 }}s{{ end }}</summary>
+    <div class="agents-list">
+      {{ range $item.Agents }}
+      <a class="file-item agent{{ if eq .Path $current }} active{{ end }}"
+         href="/session/{{ .Path }}"
+         title="{{ .Path }}">
+        <div class="file-title">{{ if .Title }}{{ .Title }}{{ else }}{{ shortID .AgentID }}{{ end }}</div>
+        <div class="file-meta">
+          <span>{{ formatStamp .Modified }}</span>
+        </div>
+      </a>
+      {{ end }}
+    </div>
+  </details>
+  {{ end }}
+</div>
+{{ end }}

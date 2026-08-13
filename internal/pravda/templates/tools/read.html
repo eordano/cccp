@@ -1,0 +1,11 @@
+{{ define "tool-Read" }}
+{{ $fp := field . "file_path" }}
+{{ $body := resultText .ResultContent }}
+<details>
+  <summary>
+    <div class="content-title">{{ basename $fp }}</div>
+    <div class="content-preview">{{ lineCount $body }} lines</div>
+  </summary>
+  <pre class="content-details selectable" style="max-height:30em">{{ truncate $body 20000 }}</pre>
+</details>
+{{ end }}

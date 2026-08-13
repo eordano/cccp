@@ -1,0 +1,6 @@
+{
+  "name": "cccp",
+  "version": "0.1.0",
+  "description": "Continuous sync for ~/.claude: watches for local changes (pushes them) and subscribes to the cccp server's event stream (pulls on remote changes). Driven by Claude Code session lifecycle via cccp watch.",
+  "author": "cccp"
+}

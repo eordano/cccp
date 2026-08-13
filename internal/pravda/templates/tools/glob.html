@@ -1,0 +1,11 @@
+{{ define "tool-Glob" }}
+{{ $pattern := field . "pattern" }}
+{{ $body := resultText .ResultContent }}
+<details>
+  <summary>
+    <div class="content-title">{{ $pattern }}</div>
+    <div class="content-preview">{{ lineCount $body }} files</div>
+  </summary>
+  <pre class="content-details selectable" style="max-height:30em">{{ if $body }}{{ $body }}{{ else }}No matches{{ end }}</pre>
+</details>
+{{ end }}

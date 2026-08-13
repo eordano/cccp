@@ -1,0 +1,11 @@
+{{ define "tool-ToolSearch" }}
+{{ $q := field . "query" }}
+{{ $matches := rawList .ToolUseResult "matches" }}
+<details>
+  <summary>
+    <div class="content-title">{{ $q }}</div>
+    <div class="content-preview">{{ len $matches }} matches</div>
+  </summary>
+  <ul class="content-details">{{ range $matches }}<li>{{ decodeString . }}</li>{{ end }}</ul>
+</details>
+{{ end }}

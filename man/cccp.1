@@ -1,0 +1,596 @@
+.TH CCCP 1 "April 16, 2026" "cccp 0.1" "User Commands"
+.SH NAME
+cccp \- cloud code config provider; sync ~/.claude across machines
+.SH SYNOPSIS
+.B cccp
+.I command
+.RI [ flags ]
+.SH DESCRIPTION
+.B cccp
+synchronises the Claude Code state directory (by default
+.IR $HOME/.claude )
+across multiple hosts through a small HTTP + SQLite server.
+Regular files are content-addressed and resolved last-write-wins;
+.I *.jsonl
+files are treated as append-only logs, with lines deduped across hosts by
+content hash. Deletions propagate as tombstones.
+.PP
+One binary drives five subcommands:
+.B serve
+runs the server,
+.B push
+ships local state,
+.B pull
+downloads remote state,
+.B watch
+runs a sync daemon, and
+.B explore
+launches a standalone session viewer.
+.SH COMMANDS
+.TP
+.B serve
+Run the storage server. Requires a bearer token (via
+.BR --token ,
+.BR CCCP_TOKEN ,
+or
+.BR config.token ).
+When running, the server also hosts the session viewer at the
+root URL behind cookie authentication.
+.TP
+.B push
+Walk the allowlist, upload blobs and append log lines, then tombstone
+paths that were previously pushed but have since disappeared from disk.
+.IP
+During push, the built-in secret scanner (cheka) examines each file for
+API keys, tokens, passwords, private keys, connection strings, and other
+sensitive material. All scanning is local; nothing leaves the machine if
+secrets are found. By default, push fails on any finding. Use
+.B --cheka-allow
+to tolerate up to N findings, or
+.B "--cheka-allow -1"
+to disable the check. With
+.BR --cheka-redact ,
+secrets in log files are replaced with
+.B [REDACTED:kind]
+and the push proceeds; blob files with secrets still fail.
+.TP
+.B "pull [--full]"
+Incremental pull: write only blob files whose content differs from local,
+append log lines newer than the saved cursor (deduped against local).
+With
+.BR --full ,
+rewrite every blob from the server snapshot and replay all log lines
+from cursor=0. Useful for bootstrapping a fresh host.
+.TP
+.B watch
+Run the sync daemon. Watches
+.I ~/.claude
+via fsnotify and pushes changes on a debounce window (default 500ms).
+Subscribes to the server's SSE event stream and pulls on remote changes.
+Can run standalone or be driven by Claude Code session hooks.
+.IP
+Sub-subcommands:
+.RS
+.TP
+.B "watch hook-start"
+Claude Code SessionStart hook. Reads JSON payload from stdin, records
+the session id, and spawns the daemon if not already running.
+.TP
+.B "watch hook-end"
+Claude Code SessionEnd hook. Reads JSON payload from stdin, drops
+the session id. When no sessions remain, sends SIGTERM to the daemon.
+.TP
+.B "watch status"
+Print daemon status: PID, session count, and liveness label. Liveness is
+tri-state:
+.B running
+(pid exists and responds to signal 0),
+.B "not running"
+(no pidfile or the pid is gone), or
+.B unknown
+(pidfile is present but the process cannot be probed, typically because
+it belongs to another UID).
+.TP
+.B "watch stop"
+Send SIGTERM to the daemon.
+.RE
+.TP
+.B "explore [dir]"
+Launch the standalone session viewer. Reads Claude Code project
+logs from the given directory (default
+.IR $HOME/.claude/projects )
+and serves a timeline UI on the configured port (default 9123).
+.TP
+.B host-id
+Print this host's persistent UUID (generated on first run, stored under
+.IR $dir/cccp/host_id ).
+.TP
+.B "help, -h, --help"
+Print the built-in usage summary.
+.SH CONFIGURATION
+Settings resolve from four layers, later wins:
+.IP "1." 4
+Built-in defaults.
+.IP "2."
+JSON config file at
+.I $dir/cccp/config.json
+(override with
+.B --config
+or
+.BR CCCP_CONFIG ).
+.IP "3."
+Environment variables.
+.IP "4."
+Command-line flags.
+.PP
+An explicit empty string in a higher layer still overrides a non-empty
+lower layer \(em
+.I false
+and
+.I unset
+are not the same. For example,
+.B --token ""
+blanks out a token from
+.I config.json
+rather than falling through to it.
+.PP
+The config path itself is resolved in two passes: first,
+.B $dir
+is computed from defaults + env + CLI. The file at
+.IR $dir/cccp/config.json
+is then loaded. Finally, the full four-layer merge runs. A
+.B dir
+key inside
+.I config.json
+can redirect downstream paths (host_id, default DB) but cannot change
+which config file was loaded.
+.SH FLAGS
+.TP
+.BI "--dir " PATH
+Config root directory. Default
+.IR $HOME/.claude .
+Env:
+.BR CCCP_DIR .
+.TP
+.BI "--url, --server-url " URL
+Server base URL, e.g.
+.IR https://host:12110 .
+Env:
+.BR CCCP_URL .
+.TP
+.BI "--token " TOKEN
+Bearer token. Required by
+.B serve
+(to accept) and
+.BR push / pull / watch
+(to present). Env:
+.BR CCCP_TOKEN .
+.TP
+.BI "--addr, --address " ADDR
+Listen address for
+.BR serve .
+Default
+.IR :12110 .
+A value carrying an
+.I http://
+or
+.I https://
+scheme is treated as
+.B --url
+(with a warning) and the listen address resets to the default \(em a
+listen address never has a scheme, so the user almost certainly meant
+the server URL. Env:
+.BR CCCP_ADDR .
+.TP
+.BI "--port " N
+Listen port; replaces only the port portion of
+.BR --addr .
+Env:
+.BR CCCP_PORT .
+.TP
+.BI "--db, --database, --db-path " PATH
+SQLite database path. Default
+.IR $dir/cccp/store.sqlite .
+Env:
+.BR CCCP_DB .
+.TP
+.BI "--config " PATH
+Path to the JSON config file. Default
+.IR $dir/cccp/config.json .
+If specified explicitly and the file is missing, cccp exits with an error.
+If the default path is missing, cccp continues silently. Env:
+.BR CCCP_CONFIG .
+.TP
+.BI "--debounce-ms " N
+Watch debounce window in milliseconds. Default 500.
+Only meaningful for
+.BR "cccp watch" .
+Env:
+.BR CCCP_DEBOUNCE_MS .
+.TP
+.BI "--cheka-allow " N
+Tolerate up to N secret findings. Default 0 (fail on any).
+Pass -1 to disable secret scanning entirely.
+Applies to
+.B push
+and
+.BR watch .
+Env:
+.BR CCCP_CHEKA_ALLOW .
+.TP
+.B --cheka-redact
+Redact secrets in log files instead of blocking the push.
+Each secret match is replaced with
+.BR [REDACTED:kind] .
+Blob files with secrets still fail (redacting would change the
+content hash). Findings are logged to stderr as warnings.
+Applies to
+.B push
+and
+.BR watch .
+.B cccp watch
+defaults this to
+.I true
+unless some layer explicitly sets it to false \(em a background daemon
+that silently stops syncing is worse than redacted log lines. Env:
+.BR CCCP_CHEKA_REDACT .
+.TP
+.B --full
+(\c
+.B pull
+only) Bootstrap: rewrite every blob, replay logs from cursor=0.
+.TP
+.BI "-p " PORT
+(\c
+.B explore
+only) HTTP port for the session viewer. Default 9123.
+.SH ENVIRONMENT
+.TP
+.B CCCP_DIR
+Alternate config root.
+.TP
+.B CCCP_URL
+Server URL for
+.BR push / pull / watch .
+.TP
+.B CCCP_TOKEN
+Bearer token.
+.TP
+.B CCCP_ADDR
+Listen address for
+.BR serve .
+.TP
+.B CCCP_PORT
+Listen port; overrides the port in
+.BR CCCP_ADDR / --addr .
+.TP
+.B CCCP_DB
+SQLite database path.
+.TP
+.B CCCP_CONFIG
+Path to the JSON config file.
+.TP
+.B CCCP_DEBOUNCE_MS
+Watch debounce window in milliseconds.
+.TP
+.B CCCP_CHEKA_ALLOW
+Tolerate up to N secret findings (default 0; -1 disables).
+.TP
+.B CCCP_CHEKA_REDACT
+Set to
+.B true
+to redact secrets in log files instead of blocking.
+.SH FILES
+.TP
+.I $dir/cccp/config.json
+Optional JSON configuration. Recognised keys:
+.BR dir ,
+.BR url ,
+.BR token ,
+.BR addr ,
+.BR port ,
+.BR db ,
+.BR debounce_ms ,
+.BR cheka_allow ,
+.BR cheka_redact ,
+.BR allowlist
+(array of strings).
+.B allowlist
+is the only knob that lives exclusively in the config file \(em it is
+not available as a flag or environment variable.
+Unknown keys cause a parse error.
+.TP
+.I $dir/cccp/host_id
+Persistent host UUID, generated on first run.
+.TP
+.I $dir/cccp/state.json
+Local sync bookkeeping: known pushed/pulled blob paths (deletion
+tracking in both directions), the log cursor, per-log-file byte offsets
+of lines already pushed, and a blob hash cache keyed on
+.B (mtime_ns, size)
+that lets unchanged files skip both hashing and secret scanning. Safe to
+delete; will be rebuilt on next push/pull (at the cost of one full
+re-hash and re-scan).
+.TP
+.I $dir/cccp/sessions.json, sessions.lock, secretary.pid, secretary.daemon.lock, secretary.log
+Watch-daemon lifecycle state: the active Claude Code session list
+(flocked through sessions.lock), the daemon's pidfile, the exclusive
+lock held for the daemon's lifetime, and its log.
+.TP
+.I $dir/cccp/store.sqlite
+Server-only SQLite database containing blobs, file versions, log lines,
+and host records.
+.SH ALLOWLIST
+Entries ending in
+.B /
+are recursed; bare names are single files. Any
+.I *.jsonl
+file is routed to the append-only log pipeline regardless of its
+position in the allowlist. If
+.B allowlist
+is omitted from
+.IR config.json ,
+the built-in default applies:
+.PP
+.RS
+.IR agents/ ,
+.IR commands/ ,
+.IR file-history/ ,
+.IR hooks/ ,
+.IR memory/ ,
+.IR paste-cache/ ,
+.IR plans/ ,
+.IR projects/ ,
+.IR skills/ ,
+.IR tasks/ ,
+.IR CLAUDE.md ,
+.IR history.jsonl ,
+.IR settings.json .
+.RE
+.PP
+Symlinks within allowlisted paths are resolved to their target content
+and shipped under the symlink's path. Non-regular, non-symlink entries
+(sockets, devices, pipes) are silently skipped.
+.SH HTTP API
+All endpoints except
+.B /healthz
+require
+.BR "Authorization: Bearer $TOKEN" .
+Write endpoints
+.RB ( "POST /ingest" ", " "POST /log/append" )
+additionally require an
+.B X-Host-Id
+header identifying the pushing host. The remaining endpoints
+.RB ( "PUT /blob/{sha}" ", " "GET /current" ", " "GET /log/since" ", " "GET /events" )
+will consult
+.B X-Host-Id
+when present (for echo suppression on
+.BR /events )
+but do not reject requests that omit it.
+.TP
+.B "POST /ingest"
+Submit a file manifest as NDJSON. Each line is an object with fields
+.BR path ,
+.BR sha ,
+.BR size ,
+.BR mode ,
+.BR mtime_ns .
+A line with
+.B sha=""
+signals a deletion (tombstone). The server responds with a JSON object
+containing
+.B need
+(list of SHAs it doesn't have yet),
+.BR committed ,
+.BR skipped ,
+and
+.B pending
+counts. Ingest is two-phase: an entry whose blob is missing is
+.I not
+committed \(em it is counted as pending. The client must upload the
+needed blobs and re-send the same manifest to commit them. An entry
+whose latest stored version already matches is counted as skipped, so
+re-pushing unchanged files appends no new versions.
+.TP
+.B "PUT /blob/{sha}"
+Upload a content-addressed blob. The request body is the raw file
+content; the server verifies its SHA256 matches the URL parameter.
+Maximum size: 1 GiB. Returns 201 Created on success.
+.TP
+.B "GET /current"
+Download the current LWW snapshot as a tar archive. Each entry is the
+latest non-tombstoned version of a file, with mode and mtime preserved.
+.TP
+.B "POST /log/append"
+Append log lines as NDJSON. Each line has fields
+.BR path ,
+.BR line
+(the raw JSONL content), and
+.BR suggested_time .
+Lines are deduped by content hash per path. The response includes
+.B new
+and
+.B dup
+counts.
+.TP
+.B "GET /log/since?since={ns}"
+Fetch log lines whose
+.B first_seen
+(server wall clock, nanoseconds) is strictly greater than the given
+cursor. Returns NDJSON with fields
+.BR path ,
+.BR line ,
+.BR suggested_time ,
+.BR first_seen .
+.TP
+.B "GET /events"
+Server-Sent Events stream. Broadcasts a JSON tick on every push,
+containing the pushing host's ID.
+.B cccp watch
+subscribes to this for pull triggers. The connection is long-lived;
+clients should reconnect with exponential backoff on failure.
+.TP
+.B "GET /healthz"
+Returns
+.B ok
+with status 200. No authentication required.
+.SH SECRET SCANNING
+On every push, the built-in cheka scanner checks each file and log line
+for sensitive material before any network calls. Patterns fall into two
+tiers. Precise, service-specific shapes:
+.PP
+.RS
+.IP \(bu 2
+Known token prefixes: Anthropic
+.RB ( sk-ant- ),
+OpenAI
+.RB ( sk- ,
+.BR sk-proj- ,
+\&...), GitHub
+.RB ( gh[pousr]_ ,
+.BR github_pat_ ),
+GitLab
+.RB ( glpat- ),
+Slack (tokens and webhook URLs), Stripe, Google (API keys and
+.B ya29.
+OAuth tokens), Hugging Face
+.RB ( hf_ ),
+npm, SendGrid, Docker Hub, DigitalOcean, Hasura, Synadia
+.RB ( syt_ ).
+.IP \(bu
+JSON Web Tokens (three-segment base64url with eyJ headers).
+.IP \(bu
+AWS access keys (AKIA or temporary ASIA, followed by 16 uppercase
+alphanumerics).
+.IP \(bu
+Private key block headers
+.RB ( "-----BEGIN ... PRIVATE KEY-----" ).
+.RE
+.PP
+And generic shapes, which additionally pass through a denoise filter
+(known documentation examples, placeholder markers, template literals,
+environment-variable references, dictionary words, identifier-shaped
+values, and low-entropy strings are all discarded):
+.PP
+.RS
+.IP \(bu 2
+Connection strings with embedded passwords
+.RB ( "://user:password@host" ).
+.IP \(bu
+Bearer tokens (20+ characters after "Bearer").
+.IP \(bu
+Key-value secrets
+.RB ( PASSWORD= ", " TOKEN= ", " SECRET= ", " API_KEY= ,
+etc., with values of 8+ characters).
+.IP \(bu
+Hex runs longer than 64 characters \(em git SHAs (40) and SHA256
+digests (64) never trigger, and low-entropy dumps are filtered out.
+.RE
+.PP
+Precise patterns run first and claim their span, so a JWT inside a
+Bearer header reports once, under the most specific kind.
+Binary files (non-UTF-8 content) are skipped. Findings are logged to
+stderr with path, kind, and line number. By default, push fails if any
+secrets are found. Use
+.B "--cheka-allow N"
+to tolerate up to N findings, or
+.B "--cheka-allow -1"
+to disable scanning entirely. With
+.BR --cheka-redact ,
+secrets found in log files are replaced in-flight with
+.B [REDACTED:kind]
+before the lines are sent to the server. Blob files with secrets still
+block the push (redacting would change the content hash and cause
+round-trip mismatches).
+.SH SQLITE SCHEMA
+The server stores all data in a single SQLite database with WAL mode,
+NORMAL synchronous, and a single writer connection. The schema contains
+four tables:
+.TP
+.B blobs
+Content-addressed file storage. Primary key is the SHA256 hex digest.
+.TP
+.B file_versions
+Append-only version history for each path. A version with
+.B content_sha IS NULL
+represents a deletion. The partial index
+.B fv_content_sha
+covers only non-NULL rows for efficient reverse lookups without
+indexing tombstones.
+.TP
+.B hosts
+Host registration with heartbeat timestamps.
+.TP
+.B log_lines
+Append-only log storage. Primary key is
+.BR "(path, line_hash)" ,
+making dedup content-based rather than host-based. The
+.B first_seen
+column uses server wall-clock time; clients use it as their cursor for
+incremental pulls. Never cursor by
+.BR suggested_time .
+.SH EXAMPLES
+Run a server on port 12110 with a generated token:
+.PP
+.RS
+.EX
+export CCCP_TOKEN=$(openssl rand -hex 32)
+cccp serve --port 12110
+.EE
+.RE
+.PP
+Bootstrap a client and ship local changes:
+.PP
+.RS
+.EX
+export CCCP_URL=https://host.example:12110 CCCP_TOKEN=...
+cccp pull --full
+cccp push
+.EE
+.RE
+.PP
+Run the watch daemon standalone:
+.PP
+.RS
+.EX
+cccp watch --url https://host.example:12110 --token "$CCCP_TOKEN"
+.EE
+.RE
+.PP
+Browse local sessions:
+.PP
+.RS
+.EX
+cccp explore
+cccp explore -p 8080 /path/to/projects
+.EE
+.RE
+.PP
+Use a config file with a custom allowlist:
+.PP
+.RS
+.EX
+cat > ~/.claude/cccp/config.json <<EOF
+{
+  "url": "https://host.example:12110",
+  "token": "my-secret-token",
+  "allowlist": ["memory/", "hooks/", "CLAUDE.md"]
+}
+EOF
+cccp push
+.EE
+.RE
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Runtime error (network, disk, validation, secrets found).
+.TP
+.B 2
+Usage error (unknown command or flag).
+.SH SEE ALSO
+.BR curl (1),
+.BR tar (1),
+.BR systemd.service (5).

@@ -1,0 +1,11 @@
+{{ define "tool-Write" }}
+{{ $fp := field . "file_path" }}
+{{ $content := field . "content" }}
+<details>
+  <summary>
+    <div class="content-title">{{ basename $fp }}</div>
+    <div class="content-preview"><span class="diff-add">+{{ lineCount $content }}</span> lines · {{ len $content }} chars</div>
+  </summary>
+  <pre class="content-details selectable" style="max-height:30em">{{ $content }}</pre>
+</details>
+{{ end }}

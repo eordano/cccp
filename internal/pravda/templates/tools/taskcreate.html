@@ -1,0 +1,23 @@
+{{ define "tool-TaskCreate" }}{{ template "tool-task-variant" . }}{{ end }}
+{{ define "tool-TaskUpdate" }}{{ template "tool-task-variant" . }}{{ end }}
+{{ define "tool-TaskGet" }}{{ template "tool-task-variant" . }}{{ end }}
+{{ define "tool-TaskList" }}{{ template "tool-task-variant" . }}{{ end }}
+
+{{ define "tool-task-variant" }}
+{{ $subject := field . "subject" }}
+{{ $taskId := field . "taskId" }}
+{{ $status := field . "status" }}
+{{ $active := field . "activeForm" }}
+{{ $desc := field . "description" }}
+{{ $title := $subject }}{{ if not $title }}{{ if $taskId }}{{ $title = printf "Task #%s" $taskId }}{{ else }}{{ $title = .Name }}{{ end }}{{ end }}
+{{ $summary := "" }}
+{{ if eq .Name "TaskUpdate" }}{{ if $taskId }}{{ $summary = printf "#%s" $taskId }}{{ end }}{{ if $status }}{{ $summary = printf "%s -> %s" $summary $status }}{{ end }}
+{{ else }}{{ if $active }}{{ $summary = $active }}{{ else }}{{ $summary = $desc }}{{ end }}{{ end }}
+<details>
+  <summary>
+    <div class="content-title">{{ $title }}</div>
+    <div class="content-preview">{{ $summary }}</div>
+  </summary>
+  <pre class="content-details selectable">{{ resultText .ResultContent }}</pre>
+</details>
+{{ end }}

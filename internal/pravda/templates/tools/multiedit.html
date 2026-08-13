@@ -1,0 +1,23 @@
+{{ define "tool-MultiEdit" }}
+{{ $fp := field . "file_path" }}
+{{ $edits := rawList .Input "edits" }}
+{{ $added := 0 }}{{ $removed := 0 }}
+{{ range $edits }}{{ $added = add1 $added }}{{ $removed = add1 $removed }}{{ end }}
+<details>
+  <summary>
+    <div class="content-title">{{ basename $fp }}</div>
+    <div class="content-preview">{{ len $edits }} edits</div>
+  </summary>
+  <div class="content-details">
+    {{ range $i, $e := $edits }}
+    <div class="diff-section">
+      <div class="diff-label">Edit {{ add1 $i }} · <span class="diff-add">+{{ lineCount (rawField $e "new_string") }}</span> <span class="diff-del">-{{ lineCount (rawField $e "old_string") }}</span> lines</div>
+      <div class="diff-minus-label">- Old</div>
+      <pre class="diff-minus selectable">{{ rawField $e "old_string" }}</pre>
+      <div class="diff-plus-label">+ New</div>
+      <pre class="diff-plus selectable">{{ rawField $e "new_string" }}</pre>
+    </div>
+    {{ end }}
+  </div>
+</details>
+{{ end }}

@@ -1,0 +1,77 @@
+{{ define "event-attachment" }}
+{{ $a := eventData .Attach }}
+{{ if eq .Subtype "file" }}
+  {{ template "attachment-file" . }}
+{{ else if eq .Subtype "compact_file_reference" }}
+  <div class="content-title">{{ rawField .Attach "displayPath" }}</div>
+  <div class="content-preview">{{ rawField .Attach "filename" }}</div>
+{{ else if eq .Subtype "directory" }}
+  {{ $body := rawField .Attach "content" }}
+  <details><summary><div class="content-title">{{ rawField .Attach "displayPath" }}{{ if not (rawField .Attach "displayPath") }}{{ rawField .Attach "path" }}{{ end }}</div><div class="content-preview">{{ lineCount $body }} items</div></summary><pre class="content-details selectable" style="max-height:30em">{{ $body }}</pre></details>
+{{ else if eq .Subtype "plan_mode_exit" }}
+  <div class="content-title">Exited plan mode</div>
+  <div class="content-preview">{{ if index $a "planExists" }}Plan saved · {{ rawField .Attach "planFilePath" }}{{ else }}No plan file written{{ end }}</div>
+{{ else if eq .Subtype "queued_command" }}
+  {{ $prompt := rawField .Attach "prompt" }}
+  {{ $notif := parseNotif $prompt }}
+  {{ if $notif }}
+    <div class="content-title">{{ if index $notif "summary" }}{{ index $notif "summary" }}{{ else }}Task notification{{ end }} {{ if index $notif "taskId" }}<code class="agent-id">{{ index $notif "taskId" }}</code>{{ end }}</div>
+    <div class="content-preview">status: {{ index $notif "status" }}</div>
+    {{ if index $notif "result" }}
+    <details class="agent-section">
+      <summary class="agent-section-toggle">Result</summary>
+      <div class="agent-result-body">{{ markdown (index $notif "result") }}</div>
+    </details>
+    {{ end }}
+  {{ else }}
+    {{ $first := firstLine $prompt }}
+    <div class="content-title">{{ truncate $first 100 }}</div>
+    <div class="content-preview">{{ rawField .Attach "commandMode" }} · {{ len $prompt }} chars</div>
+    {{ if gt (lineCount $prompt) 1 }}<details><summary class="content-preview">expand</summary><pre class="content-details selectable" style="max-height:20em">{{ $prompt }}</pre></details>{{ end }}
+  {{ end }}
+{{ else if eq .Subtype "edited_text_file" }}
+  {{ $name := rawField .Attach "filename" }}
+  {{ $snippet := rawField .Attach "snippet" }}
+  <details><summary><div class="content-title">{{ basename $name }}</div><div class="content-preview">file edited</div></summary><pre class="content-details selectable" style="max-height:20em">{{ $snippet }}</pre></details>
+{{ else if eq .Subtype "task_reminder" }}
+  {{ template "attachment-task_reminder" . }}
+{{ else if eq .Subtype "skill_listing" }}
+  <details><summary class="content-preview">{{ rawInt .Attach "skillCount" }} skills available</summary><pre class="content-details selectable">{{ rawField .Attach "content" }}</pre></details>
+{{ else if eq .Subtype "deferred_tools_delta" }}
+  {{ $added := rawList .Attach "addedNames" }}{{ $removed := rawList .Attach "removedNames" }}
+  <div class="content-preview">{{ len $added }} added{{ if $removed }}, {{ len $removed }} removed{{ end }}</div>
+{{ else }}
+  <div class="content-preview">{{ .Subtype }}</div>
+  <details><summary class="content-preview">raw</summary><pre class="content-details selectable">{{ json .Attach }}</pre></details>
+{{ end }}
+{{ end }}
+
+{{ define "attachment-file" }}
+{{ $displayPath := rawField .Attach "displayPath" }}
+{{ $filename := rawField .Attach "filename" }}
+{{ $body := rawPath .Attach "content" "file" "content" }}
+{{ $name := $displayPath }}
+{{ if not $name }}{{ $name = basename $filename }}{{ end }}
+<details>
+  <summary>
+    <div class="content-title">{{ $name }}</div>
+    <div class="content-preview">{{ lineCount $body }} lines · {{ len $body }} chars</div>
+  </summary>
+  <pre class="content-details selectable" style="max-height:30em">{{ truncate $body 40000 }}</pre>
+</details>
+{{ end }}
+
+{{ define "attachment-task_reminder" }}
+{{ $items := rawList .Attach "content" }}{{ $n := rawInt .Attach "itemCount" }}
+{{ if not $items }}
+  <div class="content-preview">Empty task list -- reminder dropped</div>
+{{ else }}
+  <div class="content-title">{{ $n }} task{{ if ne $n 1 }}s{{ end }}</div>
+  <details><summary class="content-preview">expand</summary><ul class="content-details todo-list">
+    {{ range $items }}
+      {{ $status := rawField . "status" }}
+      <li class="todo-{{ $status }}">{{ if eq $status "completed" }}✅{{ else if eq $status "in_progress" }}⏳{{ else }}⭕{{ end }} <b>#{{ rawField . "id" }} </b>{{ rawField . "subject" }}</li>
+    {{ end }}
+    </ul></details>
+{{ end }}
+{{ end }}

@@ -1,0 +1,18 @@
+vendor/
+/cccp
+/claude-watch
+/pravda.test
+*.test
+
+# Coq build artifacts (proofs/)
+proofs/*.vo
+proofs/*.vos
+proofs/*.vok
+proofs/*.glob
+proofs/.*.aux
+proofs/.*.cache
+result
+result-*
+*.sqlite
+*.sqlite-wal
+internal/pravda/public/htmx.min.js

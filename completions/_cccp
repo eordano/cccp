@@ -1,0 +1,93 @@
+#compdef cccp
+# zsh completion for cccp
+# Install into any directory in $fpath, e.g.
+#   ~/.zsh/completions/_cccp
+#   /usr/local/share/zsh/site-functions/_cccp
+
+_cccp() {
+    local -a commands
+    commands=(
+        'serve:Run the storage server'
+        'push:Ship local state to the server'
+        'pull:Pull remote state to local disk'
+        'watch:Watch ~/.claude and sync on change'
+        'explore:Browse local sessions as rich timelines'
+        'host-id:Print this host'"'"'s persistent UUID'
+        'help:Show usage'
+    )
+
+    local -a common_flags
+    common_flags=(
+        '--dir[config root directory]:directory:_directories'
+        '--url[server URL]:url:'
+        '--server-url[alias for --url]:url:'
+        '--token[bearer token]:token:'
+        '--addr[listen address]:addr:'
+        '--address[alias for --addr]:addr:'
+        '--port[listen port; overrides --addr port]:port:'
+        '--db[sqlite database path]:file:_files'
+        '--database[alias for --db]:file:_files'
+        '--db-path[alias for --db]:file:_files'
+        '--config[JSON config file path]:file:_files'
+        '(-h --help)'{-h,--help}'[show help]'
+    )
+
+    local -a watch_commands
+    watch_commands=(
+        'hook-start:SessionStart hook (reads JSON on stdin)'
+        'hook-end:SessionEnd hook (reads JSON on stdin)'
+        'status:Print daemon status'
+        'stop:SIGTERM the daemon'
+    )
+
+    _arguments -C \
+        '1: :->command' \
+        '*:: :->args'
+
+    case $state in
+        command)
+            _describe -t commands 'cccp command' commands
+            ;;
+        args)
+            case $words[1] in
+                pull)
+                    _arguments $common_flags '--full[bootstrap: rewrite everything]'
+                    ;;
+                push)
+                    _arguments $common_flags \
+                        '--cheka-allow[tolerate up to N secret findings (-1 disables)]:count:' \
+                        '--cheka-redact[redact secrets in log files instead of blocking]'
+                    ;;
+                watch)
+                    _arguments -C $common_flags \
+                        '--debounce-ms[debounce window in ms (default 500)]:ms:' \
+                        '--cheka-allow[tolerate up to N secret findings (-1 disables)]:count:' \
+                        '--cheka-redact[redact secrets in log files instead of blocking]' \
+                        '1: :->watch_command' \
+                        '*:: :->watch_args'
+                    case $state in
+                        watch_command)
+                            _describe -t commands 'watch command' watch_commands
+                            ;;
+                        watch_args)
+                            _arguments $common_flags
+                            ;;
+                    esac
+                    ;;
+                explore)
+                    _arguments \
+                        '(-p --port)'{-p,--port}'[HTTP port (default 9123)]:port:' \
+                        '(-h --help)'{-h,--help}'[show help]' \
+                        '1:directory:_directories'
+                    ;;
+                serve|host-id)
+                    _arguments $common_flags
+                    ;;
+                help)
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_cccp "$@"

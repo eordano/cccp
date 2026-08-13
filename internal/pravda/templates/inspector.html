@@ -1,0 +1,38 @@
+{{ define "inspector" }}
+<header class="header">
+  <div class="header-session">
+    <div class="session-title">Event inspector · {{ .Entry.Kind }}{{ if .Entry.Name }} / {{ .Entry.Name }}{{ end }}</div>
+    <div class="session-sub">
+      {{ if .BackURL }}<a class="nav-link" href="{{ .BackURL }}"><- back to session</a>{{ end }}
+    </div>
+  </div>
+</header>
+<div class="timeline-wrap">
+  <div class="timeline">
+    <section class="info-modal-body">
+      <section>
+        <h3>Normalized entry</h3>
+        <pre class="json-pre selectable">{{ json .Entry }}</pre>
+      </section>
+      {{ if .ToolUse }}
+      <section>
+        <h3>tool_use</h3>
+        <pre class="json-pre selectable">{{ json .ToolUse }}</pre>
+      </section>
+      {{ end }}
+      {{ if .Raw }}
+      <section>
+        <h3>{{ if .ToolUse }}Assistant event{{ else }}Raw source{{ end }}</h3>
+        <pre class="json-pre selectable">{{ json .Raw.Raw }}</pre>
+      </section>
+      {{ end }}
+      {{ if .Result }}
+      <section>
+        <h3>Tool result event</h3>
+        <pre class="json-pre selectable">{{ json .Result.Raw }}</pre>
+      </section>
+      {{ end }}
+    </section>
+  </div>
+</div>
+{{ end }}

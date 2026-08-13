@@ -1,0 +1,14 @@
+{{ define "tool-TodoWrite" }}
+{{ $todos := rawList .Input "todos" }}
+<details>
+  <summary>
+    <div class="content-title">{{ len $todos }} todos</div>
+  </summary>
+  <ul class="content-details todo-list">
+  {{ range $todos }}
+    {{ $status := rawField . "status" }}
+    <li class="todo-{{ $status }}">{{ if eq $status "completed" }}✅{{ else if eq $status "in_progress" }}⏳{{ else }}⭕{{ end }} {{ rawField . "content" }}</li>
+  {{ end }}
+  </ul>
+</details>
+{{ end }}

@@ -1,0 +1,7 @@
+{{ define "event-thinking" }}
+{{ if .HasBody }}
+<details><summary><div class="content-title">Thinking</div><div class="content-preview">Internal reasoning</div></summary><pre class="content-details selectable">{{ .Text }}</pre></details>
+{{ else }}
+<div class="content-title">Thinking</div><div class="content-preview">(redacted)</div>
+{{ end }}
+{{ end }}

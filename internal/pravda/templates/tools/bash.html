@@ -1,0 +1,18 @@
+{{ define "tool-Bash" }}
+{{ $input := eventData .Input }}
+{{ $cmd := field . "command" }}
+{{ $desc := field . "description" }}
+{{ if not $desc }}{{ $desc = firstLine $cmd }}{{ end }}
+{{ $multi := gt (lineCount $cmd) 1 }}
+{{ $out := resultText .ResultContent }}
+<details>
+  <summary>
+    <div class="content-title">{{ $desc }}</div>
+  </summary>
+  {{ if $out }}<pre class="content-details selectable">{{ $out }}</pre>{{ else if .HasResult }}<pre class="content-details">(no output)</pre>{{ else }}<div class="content-details dim">Running...</div>{{ end }}
+</details>
+<div class="cmd-row{{ if $multi }} cmd-row-multiline{{ end }}">
+  {{ if $multi }}<pre class="cmd-code selectable">{{ $cmd }}</pre>{{ else }}<code class="cmd-code selectable">{{ $cmd }}</code>{{ end }}
+  <button type="button" class="copy-btn cmd-copy" data-copy="{{ $cmd }}" title="Copy command">📋</button>
+</div>
+{{ end }}

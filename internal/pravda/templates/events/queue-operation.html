@@ -1,0 +1,33 @@
+{{ define "event-queue-operation" }}
+{{ if eq .Op "enqueue" }}
+  {{ $body := .Text }}
+  {{ $notif := parseNotif $body }}
+  {{ if $notif }}
+    <div class="content-title">{{ if index $notif "summary" }}{{ index $notif "summary" }}{{ else }}Task queued{{ end }}</div>
+    <div class="content-preview">enqueued · {{ if .Depth }}{{ .Depth }} waiting{{ else }}empty{{ end }}</div>
+  {{ else }}
+    {{ $first := firstLine $body }}
+    <div class="content-title">{{ truncate $first 120 }}</div>
+    <div class="content-preview">position {{ .Position }} · {{ if .Depth }}{{ .Depth }} waiting{{ else }}empty{{ end }}</div>
+    {{ if or (gt (len $body) 120) (gt (lineCount $body) 1) }}<details><summary class="content-preview">expand</summary><pre class="content-details selectable" style="max-height:18em">{{ $body }}</pre></details>{{ end }}
+  {{ end }}
+{{ else if or (eq .Op "dequeue") (eq .Op "remove") }}
+  {{ if .Item }}
+    {{ $notif := parseNotif .Item }}
+    {{ if $notif }}
+      <div class="content-title">{{ if index $notif "summary" }}{{ index $notif "summary" }}{{ else }}Task {{ .Op }}d{{ end }}</div>
+      <div class="content-preview">{{ if eq .Op "dequeue" }}consumed{{ else }}discarded{{ end }} · {{ if .Depth }}{{ .Depth }} waiting{{ else }}empty{{ end }} remaining</div>
+    {{ else }}
+      <div class="content-title">{{ truncate (firstLine .Item) 120 }}</div>
+      <div class="content-preview">{{ if eq .Op "dequeue" }}consumed{{ else }}discarded{{ end }} · {{ if .Depth }}{{ .Depth }} waiting{{ else }}empty{{ end }} remaining</div>
+    {{ end }}
+  {{ else }}
+    <div class="content-title">(queue empty at {{ .Op }})</div>
+  {{ end }}
+{{ else if eq .Op "popAll" }}
+  <div class="content-title">{{ if .Items }}cleared {{ len .Items }} item{{ if ne (len .Items) 1 }}s{{ end }}{{ else }}cleared (already empty){{ end }}</div>
+  <div class="content-preview">queue flushed</div>
+{{ else }}
+  <div class="content-preview">{{ .Op }}</div>
+{{ end }}
+{{ end }}

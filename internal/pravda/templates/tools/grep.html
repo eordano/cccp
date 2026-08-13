@@ -1,0 +1,12 @@
+{{ define "tool-Grep" }}
+{{ $pattern := field . "pattern" }}
+{{ $path := field . "path" }}
+{{ $body := resultText .ResultContent }}
+<details>
+  <summary>
+    <div class="content-title">"{{ $pattern }}"{{ if $path }} in {{ $path }}{{ end }}</div>
+    <div class="content-preview">{{ lineCount $body }} results</div>
+  </summary>
+  <pre class="content-details selectable" style="max-height:30em">{{ $body }}</pre>
+</details>
+{{ end }}

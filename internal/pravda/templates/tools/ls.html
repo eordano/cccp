@@ -1,0 +1,11 @@
+{{ define "tool-LS" }}
+{{ $path := field . "path" }}{{ if not $path }}{{ $path = "." }}{{ end }}
+{{ $body := resultText .ResultContent }}
+<details>
+  <summary>
+    <div class="content-title">{{ $path }}</div>
+    <div class="content-preview">{{ lineCount $body }} items</div>
+  </summary>
+  <pre class="content-details selectable" style="max-height:30em">{{ $body }}</pre>
+</details>
+{{ end }}

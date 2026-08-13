@@ -1,0 +1,51 @@
+{{ define "tool-Agent" }}
+{{ $desc := field . "description" }}
+{{ $subtype := field . "subagent_type" }}{{ if not $subtype }}{{ $subtype = "general-purpose" }}{{ end }}
+{{ $prompt := field . "prompt" }}
+{{ $resultBody := resultText .ResultContent }}
+{{ $hasResult := and $resultBody (not (and .AgentRef .AgentRef.IsAsync)) }}
+<details open>
+  <summary>
+    <div class="content-title">
+      {{ if .AgentRef.Description }}{{ .AgentRef.Description }}{{ else if $desc }}{{ $desc }}{{ else }}Agent spawn{{ end }}
+      {{ if .AgentRef }}{{ if .AgentRef.Status }} <span class="agent-badge agent-{{ .AgentRef.Status }}">{{ .AgentRef.Status }}</span>{{ end }}{{ if .AgentRef.IsAsync }} <span class="agent-badge agent-async">async</span>{{ end }}{{ if .AgentRef.AgentID }} <code class="agent-id">{{ .AgentRef.AgentID }}</code>{{ end }}{{ else }} <span class="agent-badge agent-running">running</span>{{ end }}
+    </div>
+    <div class="content-preview">-> {{ $subtype }}{{ if and .AgentRef .AgentRef.TotalDurationMs }} · {{ formatMs .AgentRef.TotalDurationMs }}{{ end }}{{ if and .AgentRef .AgentRef.TotalTokens }} · {{ .AgentRef.TotalTokens }} tokens{{ end }}{{ if and .AgentRef .AgentRef.TotalToolUseCount }} · {{ .AgentRef.TotalToolUseCount }} tool uses{{ end }}{{ if and (not .AgentRef) $prompt }} · {{ truncate $prompt 120 }}{{ end }}</div>
+  </summary>
+  <div class="content-details">
+    {{ if $prompt }}
+    <details class="agent-section"{{ if not $hasResult }} open{{ end }}>
+      <summary class="agent-section-toggle">Prompt</summary>
+      <pre class="selectable">{{ $prompt }}</pre>
+    </details>
+    {{ end }}
+    {{ if .SubAgent }}
+    <details class="agent-section"
+      hx-get="/session/{{ .ParentPath }}?subagent={{ .ID }}"
+      hx-trigger="toggle once"
+      hx-target="find .sub-agent-timeline"
+      hx-swap="innerHTML">
+      <summary class="agent-section-toggle">Sub-agent transcript · {{ len .SubAgent }} events</summary>
+      <div class="sub-agent-timeline"></div>
+    </details>
+    {{ else if .SubAgentPath }}
+    <details class="agent-section"
+      hx-get="/subagent/{{ .SubAgentPath }}"
+      hx-trigger="toggle once"
+      hx-target="find .sub-agent-timeline"
+      hx-swap="innerHTML">
+      <summary class="agent-section-toggle">Sub-agent transcript</summary>
+      <div class="sub-agent-timeline"></div>
+    </details>
+    {{ end }}
+    {{ if $resultBody }}
+    <details class="agent-section" open>
+      <summary class="agent-section-toggle">{{ if and .AgentRef .AgentRef.IsAsync }}Launch response{{ else }}Result{{ end }}</summary>
+      <div class="agent-result-body">{{ markdown $resultBody }}</div>
+    </details>
+    {{ end }}
+  </div>
+</details>
+{{ end }}
+
+{{ define "tool-Task" }}{{ template "tool-Agent" . }}{{ end }}

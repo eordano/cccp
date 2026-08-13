@@ -1,0 +1,12 @@
+{{ define "tool-generic" }}
+<details>
+  <summary>
+    <div class="content-title">{{ .Name }}</div>
+    <div class="content-preview">Tool operation</div>
+  </summary>
+  <div class="content-details">
+    <div class="dim">Input</div><pre class="selectable">{{ json .Input }}</pre>
+    <div class="dim">Result</div><pre class="selectable">{{ if resultText .ResultContent }}{{ resultText .ResultContent }}{{ else }}No output{{ end }}</pre>
+  </div>
+</details>
+{{ end }}
