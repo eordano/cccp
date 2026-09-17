@@ -205,7 +205,7 @@ func TestPush_OversizedLogLineSkippedOffsetAdvances(t *testing.T) {
 	if res.LogLinesNew != 2 {
 		t.Errorf("LogLinesNew = %d, want 2 (line after oversized one must sync)", res.LogLinesNew)
 	}
-	lines, err := st.LogContents(ctx, "history.jsonl")
+	lines, _, err := st.LogContents(ctx, "history.jsonl")
 	if err != nil {
 		t.Fatal(err)
 	}

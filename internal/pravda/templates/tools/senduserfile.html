@@ -1,0 +1,14 @@
+{{ define "tool-SendUserFile" }}
+{{ $files := .InputStrings "files" }}{{ $caption := field . "caption" }}{{ $atts := .ResultList "attachments" }}
+<details>
+  <summary>
+    <div class="content-title">{{ if $caption }}{{ truncate $caption 160 }}{{ else }}{{ len $files }} file{{ if ne (len $files) 1 }}s{{ end }} sent{{ end }}</div>
+    <div class="content-preview">{{ range $i, $f := $files }}{{ if $i }}, {{ end }}{{ basename $f }}{{ end }}{{ with field . "display" }} · {{ . }}{{ end }}{{ with field . "status" }}{{ if ne . "normal" }} · {{ . }}{{ end }}{{ end }}{{ if $atts }} · {{ len $atts }} delivered{{ end }}</div>
+  </summary>
+  <div class="content-details">
+    <ul class="todo-list">{{ range $files }}<li>📎 {{ . }}</li>{{ end }}</ul>
+    {{ range $atts }}<div class="dim">{{ basename (rawField . "path") }}{{ with rawField . "media_type" }} · {{ . }}{{ end }}{{ with rawInt . "size" }} · {{ formatSize . }}{{ end }}</div>{{ end }}
+    {{ with resultText .ResultContent }}<pre class="selectable">{{ . }}</pre>{{ end }}
+  </div>
+</details>
+{{ end }}

@@ -146,9 +146,23 @@ can redirect downstream paths (host_id, default DB) but cannot change
 which config file was loaded.
 .SH FLAGS
 .TP
+.BI "--agent " NAME
+Agent profile:
+.BR claude " (default), " codex ", " hermes ", " opencode .
+Picks the default
+.B --dir
+(the agent's own state directory) and allowlist. Non-claude agents ship
+every path under the wire prefix
+.IR agent/NAME/ .
+Env:
+.BR CCCP_AGENT ;
+config key
+.BR agent .
+.TP
 .BI "--dir " PATH
-Config root directory. Default
-.IR $HOME/.claude .
+Config root directory. Default: the agent's home,
+.I $HOME/.claude
+for claude.
 Env:
 .BR CCCP_DIR .
 .TP

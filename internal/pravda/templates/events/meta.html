@@ -1,1 +1,1 @@
-{{ define "event-meta" }}<details><summary class="content-preview">{{ truncate .Text 140 }}</summary><pre class="content-details selectable">{{ .Text }}</pre></details>{{ end }}
+{{ define "event-meta" }}<details><summary class="content-preview">{{ truncate (firstLine .Text) 140 }}{{ if .Images }} · {{ len .Images }} image{{ if ne (len .Images) 1 }}s{{ end }}{{ end }}</summary><pre class="content-details selectable">{{ .Text }}</pre>{{ template "inline-images" .Images }}</details>{{ end }}

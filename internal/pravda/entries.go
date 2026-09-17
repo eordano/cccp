@@ -1,6 +1,9 @@
 package pravda
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 const (
 	KindUser           = "user"
@@ -17,8 +20,22 @@ const (
 	KindQueueOperation = "queue-operation"
 	KindAttachment     = "attachment"
 	KindSystem         = "system"
+	KindBashInput      = "bash-input"
+	KindBashOutput     = "bash-output"
+	KindMode           = "mode"
+	KindPRLink         = "pr-link"
+	KindFrameLink      = "frame-link"
 	KindUnknown        = "unknown"
+	KindWorkflow       = "workflow"
+	KindChildSession   = "child-session"
 )
+
+type TokenUsage struct {
+	Input         int64 `json:"input_tokens"`
+	Output        int64 `json:"output_tokens"`
+	CacheRead     int64 `json:"cache_read_input_tokens"`
+	CacheCreation int64 `json:"cache_creation_input_tokens"`
+}
 
 type RawEvent struct {
 	Type        string `json:"type"`
@@ -29,6 +46,23 @@ type RawEvent struct {
 	IsMeta      bool   `json:"isMeta"`
 	CWD         string `json:"cwd"`
 	SessionID   string `json:"sessionId"`
+	Version     string `json:"version"`
+	GitBranch   string `json:"gitBranch"`
+
+	ParentSessionID string `json:"parentSessionId"`
+	AgentSource     string `json:"agentSource"`
+	AgentNickname   string `json:"agentNickname"`
+	AgentPath       string `json:"agentPath"`
+
+	AgentID string          `json:"agentId"`
+	Key     string          `json:"key"`
+	Result  json.RawMessage `json:"result"`
+
+	CodexItem string      `json:"codexItem"`
+	Model     string      `json:"model"`
+	Usage     *TokenUsage `json:"usage"`
+	CostUSD   float64     `json:"costUSD"`
+	Effort    string      `json:"effort"`
 
 	Subtype      string `json:"subtype"`
 	DurationMs   int64  `json:"durationMs"`
@@ -37,6 +71,24 @@ type RawEvent struct {
 	PermissionMode string          `json:"permissionMode"`
 	Operation      string          `json:"operation"`
 	Content        json.RawMessage `json:"content"`
+
+	Mode            string          `json:"mode"`
+	AITitle         string          `json:"aiTitle"`
+	CustomTitle     string          `json:"customTitle"`
+	Summary         string          `json:"summary"`
+	PRNumber        int             `json:"prNumber"`
+	PRUrl           string          `json:"prUrl"`
+	PRRepository    string          `json:"prRepository"`
+	FrameURL        string          `json:"frameUrl"`
+	Title           string          `json:"title"`
+	Path            string          `json:"path"`
+	HookCount       int             `json:"hookCount"`
+	CompactMetadata json.RawMessage `json:"compactMetadata"`
+
+	Level                 string `json:"level"`
+	OriginalModel         string `json:"originalModel"`
+	APIRefusalCategory    string `json:"apiRefusalCategory"`
+	APIRefusalExplanation string `json:"apiRefusalExplanation"`
 
 	Attachment json.RawMessage `json:"attachment"`
 
@@ -53,6 +105,7 @@ type Message struct {
 	Role    string          `json:"role"`
 	Model   string          `json:"model"`
 	Content json.RawMessage `json:"content"`
+	Usage   *TokenUsage     `json:"usage"`
 }
 
 type ContentItem struct {
@@ -103,6 +156,8 @@ type Entry struct {
 	Kind  string `json:"kind"`
 	TS    string `json:"ts,omitempty"`
 	Index int    `json:"index,omitempty"`
+	Agent string `json:"agent,omitempty"`
+	Model string `json:"model,omitempty"`
 
 	Text string `json:"text,omitempty"`
 	CWD  string `json:"cwd,omitempty"`
@@ -127,6 +182,22 @@ type Entry struct {
 	MessageCount int   `json:"messageCount,omitempty"`
 
 	Mode string `json:"mode,omitempty"`
+
+	Sae []SaeTag `json:"-"`
+
+	Votable bool `json:"-"`
+	Vote    int  `json:"-"`
+
+	Stderr     string `json:"stderr,omitempty"`
+	URL        string `json:"url,omitempty"`
+	Repo       string `json:"repo,omitempty"`
+	Number     int    `json:"number,omitempty"`
+	Path       string `json:"path,omitempty"`
+	HookCount  int    `json:"hookCount,omitempty"`
+	Trigger    string `json:"trigger,omitempty"`
+	PreTokens  int64  `json:"preTokens,omitempty"`
+	PostTokens int64  `json:"postTokens,omitempty"`
+	TokensLeft int64  `json:"tokensLeft,omitempty"`
 
 	Op       string       `json:"op,omitempty"`
 	Item     string       `json:"item,omitempty"`
@@ -154,14 +225,26 @@ type Entry struct {
 	RawSource  *RawEvent    `json:"-"`
 	RawToolUse *ContentItem `json:"-"`
 	RawResult  *RawEvent    `json:"-"`
+
+	Images    []ImageBlock `json:"images,omitempty"`
+	ToModel   string       `json:"toModel,omitempty"`
+	Direction string       `json:"direction,omitempty"`
+	Retracted int          `json:"retracted,omitempty"`
+	Effort    string       `json:"effort,omitempty"`
+	Level     string       `json:"level,omitempty"`
 }
 
-func (e *Entry) TemplateName() string {
-	if e.Kind == KindTool {
-		return "tool-" + e.Name
+func (e *Entry) TemplateNames() []string {
+	switch e.Kind {
+	case KindTool:
+		if strings.HasPrefix(e.Name, "mcp__claude-in-chrome__") {
+			return []string{"tool-" + e.Name, "tool-mcp-chrome", "tool-generic"}
+		}
+		return []string{"tool-" + e.Name, "tool-generic"}
+	case KindAttachment:
+		return []string{"attachment-" + e.Subtype, "event-attachment", "event-unknown"}
+	case KindSystem:
+		return []string{"system-" + e.Subtype, "event-system", "event-unknown"}
 	}
-	if e.Kind == KindAttachment {
-		return "attachment-" + e.Subtype
-	}
-	return "event-" + e.Kind
+	return []string{"event-" + e.Kind, "event-unknown"}
 }

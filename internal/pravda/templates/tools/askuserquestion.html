@@ -1,0 +1,19 @@
+{{ define "tool-AskUserQuestion" }}
+{{ $qs := .Questions }}
+<details open>
+  <summary>
+    <div class="content-title">{{ len $qs }} question{{ if ne (len $qs) 1 }}s{{ end }}{{ if .HasResult }} · answered{{ else }} · waiting{{ end }}</div>
+    <div class="content-preview">{{ range $i, $q := $qs }}{{ if $i }} · {{ end }}{{ if $q.Header }}{{ $q.Header }}{{ else }}{{ truncate $q.Question 40 }}{{ end }}{{ if $q.Answer }}: {{ truncate $q.Answer 60 }}{{ end }}{{ end }}</div>
+  </summary>
+  <div class="content-details">
+    {{ range $q := $qs }}
+    <div class="ask-question" style="margin-bottom:0.6rem">
+      <div><b>{{ $q.Question }}</b>{{ if $q.MultiSelect }} <span class="dim">(multi-select)</span>{{ end }}</div>
+      <ul class="todo-list">{{ range $q.Options }}<li class="{{ if $q.Chosen .Label }}todo-in_progress{{ end }}">{{ if $q.Chosen .Label }}✅{{ else }}⭕{{ end }} {{ .Label }}{{ if .Description }} <span class="dim">— {{ .Description }}</span>{{ end }}</li>{{ end }}</ul>
+      {{ if $q.Answer }}<div class="dim">answer: {{ $q.Answer }}</div>{{ end }}
+    </div>
+    {{ end }}
+    {{ if not $qs }}<pre class="selectable">{{ json .Input }}</pre>{{ end }}
+  </div>
+</details>
+{{ end }}

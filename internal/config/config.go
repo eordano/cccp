@@ -12,9 +12,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/eordano/cccp/internal/agent"
 )
 
 type Resolved struct {
+	Agent          string
 	Dir            string
 	URL            string
 	Token          string
@@ -24,21 +27,27 @@ type Resolved struct {
 	ChekaAllow     int
 	ChekaRedact    bool
 	ChekaRedactSet bool
+	PushOnly       bool
+	PushToken      string
 	Allowlist      []string
 	Source         string
 }
 
 type CLI struct {
+	agent                             string
 	dir, url, token, addr, db, config string
 	port, debounceMs, chekaAllow      int
-	chekaRedact                       bool
+	pushToken                         string
+	chekaRedact, pushOnly             bool
 
-	dirSet, urlSet, tokenSet                bool
-	addrSet, portSet, dbSet, cfgSet, debSet bool
-	chekaAllowSet, chekaRedactSet           bool
+	dirSet, urlSet, tokenSet                   bool
+	addrSet, portSet, dbSet, cfgSet, debSet    bool
+	chekaAllowSet, chekaRedactSet, pushOnlySet bool
+	pushTokenSet, agentSet                     bool
 }
 
 type fileShape struct {
+	Agent       *string  `json:"agent,omitempty"`
 	Dir         *string  `json:"dir,omitempty"`
 	URL         *string  `json:"url,omitempty"`
 	Token       *string  `json:"token,omitempty"`
@@ -48,12 +57,15 @@ type fileShape struct {
 	DebounceMs  *int     `json:"debounce_ms,omitempty"`
 	ChekaAllow  *int     `json:"cheka_allow,omitempty"`
 	ChekaRedact *bool    `json:"cheka_redact,omitempty"`
+	PushOnly    *bool    `json:"push_only,omitempty"`
+	PushToken   *string  `json:"push_token,omitempty"`
 	Allowlist   []string `json:"allowlist,omitempty"`
 }
 
 func RegisterFlags(fs *flag.FlagSet) *CLI {
 	c := &CLI{}
-	fs.StringVar(&c.dir, "dir", "", "config root directory (default $HOME/.claude)")
+	fs.StringVar(&c.agent, "agent", "", "agent profile: "+strings.Join(agent.ProfileNames(), ", ")+" (default claude)")
+	fs.StringVar(&c.dir, "dir", "", "config root directory (default: the agent's home, $HOME/.claude for claude)")
 	fs.StringVar(&c.url, "url", "", "server URL")
 	fs.StringVar(&c.url, "server-url", "", "alias for --url")
 	fs.StringVar(&c.token, "token", "", "bearer token")
@@ -66,6 +78,8 @@ func RegisterFlags(fs *flag.FlagSet) *CLI {
 	fs.IntVar(&c.debounceMs, "debounce-ms", 0, "secretary debounce window in ms (default 500)")
 	fs.IntVar(&c.chekaAllow, "cheka-allow", 0, "tolerate up to N secret findings (default 0; -1 disables)")
 	fs.BoolVar(&c.chekaRedact, "cheka-redact", false, "redact secrets in log files instead of blocking")
+	fs.BoolVar(&c.pushOnly, "push-only", false, "secretary: push local changes, never pull from the server")
+	fs.StringVar(&c.pushToken, "push-token", "", "serve: optional second token accepted only on the push endpoints")
 	fs.StringVar(&c.config, "config", "", "path to config file")
 	return c
 }
@@ -82,13 +96,20 @@ func Resolve(fs *flag.FlagSet, c *CLI) (*Resolved, error) {
 	c.debSet = seen["debounce-ms"]
 	c.chekaAllowSet = seen["cheka-allow"]
 	c.chekaRedactSet = seen["cheka-redact"]
+	c.pushOnlySet = seen["push-only"]
+	c.pushTokenSet = seen["push-token"]
 	c.cfgSet = seen["config"]
+	c.agentSet = seen["agent"]
 
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
 	}
-	defaultDir := filepath.Join(home, ".claude")
+	agentName := resolveStr(agent.DefaultAgent, envPtr("CCCP_AGENT"), cliPtr(c.agent, c.agentSet))
+	defaultDir, err := agentDir(home, agentName)
+	if err != nil {
+		return nil, err
+	}
 
 	dirForCfg := defaultDir
 	if v, ok := os.LookupEnv("CCCP_DIR"); ok {
@@ -124,9 +145,16 @@ func Resolve(fs *flag.FlagSet, c *CLI) (*Resolved, error) {
 	if found {
 		r.Source = cfgPath
 	}
+	r.Agent = resolveStr(agent.DefaultAgent, file.Agent, envPtr("CCCP_AGENT"), cliPtr(c.agent, c.agentSet))
+	if r.Agent != agentName {
+		if defaultDir, err = agentDir(home, r.Agent); err != nil {
+			return nil, err
+		}
+	}
 	r.Dir = resolveStr(defaultDir, file.Dir, envPtr("CCCP_DIR"), cliPtr(c.dir, c.dirSet))
 	r.URL = resolveStr("", file.URL, envPtr("CCCP_URL"), cliPtr(c.url, c.urlSet))
 	r.Token = resolveStr("", file.Token, envPtr("CCCP_TOKEN"), cliPtr(c.token, c.tokenSet))
+	r.PushToken = resolveStr("", file.PushToken, envPtr("CCCP_PUSH_TOKEN"), cliPtr(c.pushToken, c.pushTokenSet))
 	r.Addr = resolveStr(":12110", file.Addr, envPtr("CCCP_ADDR"), cliPtr(c.addr, c.addrSet))
 
 	if strings.HasPrefix(r.Addr, "http://") || strings.HasPrefix(r.Addr, "https://") {
@@ -169,8 +197,24 @@ func Resolve(fs *flag.FlagSet, c *CLI) (*Resolved, error) {
 		r.ChekaRedactSet = true
 	}
 
+	envPushOnly, err := envBoolPtr("CCCP_PUSH_ONLY")
+	if err != nil {
+		return nil, err
+	}
+	if po := resolveBool(file.PushOnly, envPushOnly, cliBoolPtr(c.pushOnly, c.pushOnlySet)); po != nil {
+		r.PushOnly = *po
+	}
+
 	r.Allowlist = file.Allowlist
 	return r, nil
+}
+
+func agentDir(home, name string) (string, error) {
+	p, ok := agent.LookupProfile(name)
+	if !ok {
+		return "", fmt.Errorf("unknown agent %q (known: %s)", name, strings.Join(agent.ProfileNames(), ", "))
+	}
+	return p.DefaultDir(home), nil
 }
 
 func loadFile(path string, explicit bool) (fileShape, bool, error) {

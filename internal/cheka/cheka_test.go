@@ -3,6 +3,7 @@ package cheka
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 const realChars = "AbC1dE2fG3hI4jK5lM6nO7pQ8rS9tU0vWxYzBc2dE4fG6hI8jK0lM3nO5pQ7rS9tU1vW3xY5z"
@@ -518,6 +519,46 @@ func TestScan_MultiLine(t *testing.T) {
 	for _, f := range ff {
 		if f.Line < 1 || f.Line > 3 {
 			t.Errorf("unexpected line number %d", f.Line)
+		}
+	}
+}
+
+func TestLongLineHintWindows(t *testing.T) {
+	filler := strings.Repeat(`{"type":"reasoning","text":"nothing to see here, tokens and secrets are words"},`, 40000)
+	secret := "kJ8sPq2vLm9xR4tWz7nB3cY6hF1dG5eA"
+	hexTok := "3f9a1c7e2b8d4f60a5e9c1b7d3f2a8e64c0b9d1f7a3e5c2b8d4f6a0e1c9b7d3f5ae"
+	line := filler + `api_key=` + secret + ` ` + filler + ` Bearer Xk29fLm3Qp8vRz1tYw6nB4cJ7hD5gS0aE2uI ` + hexTok + ` ` + filler
+	start := time.Now()
+	ff := scanLine("p", line, 1)
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("scan of %d-byte line took %s", len(line), d)
+	}
+	kinds := map[string]int{}
+	for _, f := range ff {
+		kinds[f.Kind]++
+	}
+	for _, k := range []string{"key_value", "bearer", "hex_token"} {
+		if kinds[k] == 0 {
+			t.Fatalf("expected a %s finding in a long line, got %v", k, kinds)
+		}
+	}
+	red := RedactLine(line)
+	if strings.Contains(red, secret) || strings.Contains(red, hexTok) {
+		t.Fatal("redaction missed a windowed match")
+	}
+	if len(red) == 0 || !strings.HasPrefix(red, filler[:200]) {
+		t.Fatal("redaction damaged unrelated text")
+	}
+}
+
+func TestWindowsMatchWholeLineOnShortInput(t *testing.T) {
+	short := "token=abcdefghijklmnop and AKIAABCDEFGHIJKLMNOP"
+	var lower string
+	for _, p := range patterns {
+		got := matches(short, &lower, p)
+		want := p.re.FindAllStringSubmatchIndex(short, -1)
+		if len(got) != len(want) {
+			t.Fatalf("%s: windowed %v vs direct %v", p.kind, got, want)
 		}
 	}
 }

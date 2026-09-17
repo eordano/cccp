@@ -6,12 +6,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/eordano/cccp/internal/cheka"
 )
@@ -42,6 +44,8 @@ type logAppendResp struct {
 	Dup int `json:"dup"`
 }
 
+var LogAppendChunkBytes = 16 << 20
+
 type PushResult struct {
 	BlobFiles       int
 	BlobsUploaded   int
@@ -57,9 +61,9 @@ type PushResult struct {
 
 func Push(ctx context.Context, c *Config, allowlist []string, chekaAllow int, chekaRedact bool) (*PushResult, error) {
 	if allowlist == nil {
-		allowlist = DefaultAllowlist
+		allowlist = c.DefaultAllowlist()
 	}
-	entries, skipped, err := Walk(c.Root, allowlist)
+	entries, skipped, err := Walk(c.Root, c.Prefix, allowlist)
 	if err != nil {
 		return nil, err
 	}
@@ -105,6 +109,13 @@ func Push(ctx context.Context, c *Config, allowlist []string, chekaAllow int, ch
 	}
 	var allFindings []cheka.Finding
 	for _, e := range blobs {
+		if e.Size > MaxPushBlobBytes {
+			slog.Warn("push: skip oversized blob", "path", e.RelPath, "bytes", e.Size, "max", MaxPushBlobBytes)
+			if cached, ok := state.BlobCache[e.RelPath]; ok {
+				newCache[e.RelPath] = cached
+			}
+			continue
+		}
 		if cached, ok := state.BlobCache[e.RelPath]; ok && cached.MtimeNS == e.MtimeNS && cached.Size == e.Size && cached.SHA != "" {
 			shaByPath[e.RelPath] = cached.SHA
 			manifest = append(manifest, manifestLine{
@@ -216,6 +227,7 @@ func Push(ctx context.Context, c *Config, allowlist []string, chekaAllow int, ch
 	if state.LogOffsets == nil {
 		state.LogOffsets = map[string]int64{}
 	}
+	var pushErrors []error
 	nextOffsets := map[string]int64{}
 	for _, e := range logs {
 		off := state.LogOffsets[e.RelPath]
@@ -224,15 +236,13 @@ func Push(ctx context.Context, c *Config, allowlist []string, chekaAllow int, ch
 			off = 0
 		}
 		nNew, nDup, newOff, err := pushLogFile(ctx, c, e, chekaRedact, off)
-		if err != nil {
-
-			slog.Warn("push: skip log file", "path", e.RelPath, "err", err)
-			nextOffsets[e.RelPath] = off
-			continue
-		}
 		res.LogLinesNew += nNew
 		res.LogLinesDup += nDup
 		nextOffsets[e.RelPath] = newOff
+		if err != nil {
+			slog.Warn("push: log file push incomplete", "path", e.RelPath, "err", err)
+			pushErrors = append(pushErrors, fmt.Errorf("push log %s: %w", e.RelPath, err))
+		}
 	}
 	for _, p := range skipped {
 		if off, ok := state.LogOffsets[p]; ok && IsLogPath(p) {
@@ -250,10 +260,12 @@ func Push(ctx context.Context, c *Config, allowlist []string, chekaAllow int, ch
 		return nil, fmt.Errorf("save state: %w", err)
 	}
 
-	return res, nil
+	return res, errors.Join(pushErrors...)
 }
 
 func postIngest(ctx context.Context, c *Config, manifest []manifestLine) (*ingestResp, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
 	var body bytes.Buffer
 	enc := json.NewEncoder(&body)
 	for _, m := range manifest {
@@ -284,6 +296,8 @@ func postIngest(ctx context.Context, c *Config, manifest []manifestLine) (*inges
 }
 
 func putBlob(ctx context.Context, c *Config, absPath, sha string) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
 	f, err := os.Open(absPath)
 	if err != nil {
 		return err
@@ -292,6 +306,9 @@ func putBlob(ctx context.Context, c *Config, absPath, sha string) error {
 	req, err := http.NewRequestWithContext(ctx, "PUT", c.ServerURL+"/blob/"+sha, f)
 	if err != nil {
 		return err
+	}
+	if fi, err := f.Stat(); err == nil {
+		req.ContentLength = fi.Size()
 	}
 	c.AuthReq(req)
 	req.Header.Set("Content-Type", "application/octet-stream")
@@ -327,7 +344,7 @@ func scanLogFile(e FileEntry, offset int64) []cheka.Finding {
 	}
 	var findings []cheka.Finding
 	for i, raw := range bytes.Split(data, []byte{'\n'}) {
-		if len(raw) == 0 {
+		if len(raw) == 0 || len(raw) >= MaxScanLine {
 			continue
 		}
 		if ff := cheka.ScanLine(e.RelPath, string(raw), i+1); len(ff) > 0 {
@@ -358,15 +375,33 @@ func pushLogFile(ctx context.Context, c *Config, e FileEntry, redact bool, offse
 		return 0, 0, offset, nil
 	}
 	complete := tail[:lastNL+1]
-	consumed := offset + int64(lastNL+1)
 
+	nextOffset = offset
+	var processed int64
 	var body bytes.Buffer
-	any := false
+	flush := func() error {
+		if body.Len() > 0 {
+			n, d, err := postLogAppend(ctx, c, &body)
+			if err != nil {
+				return err
+			}
+			newCount += n
+			dupCount += d
+			body.Reset()
+		}
+		nextOffset = offset + processed
+		return nil
+	}
 	for _, raw := range bytes.Split(complete[:len(complete)-1], []byte{'\n'}) {
-		line := string(raw)
-		if line == "" {
+		processed += int64(len(raw)) + 1
+		if len(raw) == 0 {
 			continue
 		}
+		if len(raw) >= MaxScanLine {
+			slog.Warn("push: skip oversized log line", "path", e.RelPath, "bytes", len(raw))
+			continue
+		}
+		line := string(raw)
 		toSend := line
 		if redact {
 			toSend = cheka.RedactLine(line)
@@ -374,7 +409,7 @@ func pushLogFile(ctx context.Context, c *Config, e FileEntry, redact bool, offse
 		ts := extractTimestamp(toSend)
 		b, err := json.Marshal(logAppendEntry{Path: e.RelPath, Line: toSend, SuggestedTime: ts})
 		if err != nil {
-			return 0, 0, offset, err
+			return newCount, dupCount, nextOffset, err
 		}
 		if len(b) >= MaxScanLine {
 			slog.Warn("push: skip oversized log line", "path", e.RelPath, "bytes", len(b))
@@ -382,30 +417,39 @@ func pushLogFile(ctx context.Context, c *Config, e FileEntry, redact bool, offse
 		}
 		body.Write(b)
 		body.WriteByte('\n')
-		any = true
+		if body.Len() >= LogAppendChunkBytes {
+			if err := flush(); err != nil {
+				return newCount, dupCount, nextOffset, err
+			}
+		}
 	}
-	if !any {
-		return 0, 0, consumed, nil
+	if err := flush(); err != nil {
+		return newCount, dupCount, nextOffset, err
 	}
+	return newCount, dupCount, nextOffset, nil
+}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", c.ServerURL+"/log/append", &body)
+func postLogAppend(ctx context.Context, c *Config, body *bytes.Buffer) (int, int, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", c.ServerURL+"/log/append", bytes.NewReader(body.Bytes()))
 	if err != nil {
-		return 0, 0, offset, err
+		return 0, 0, err
 	}
 	c.AuthReq(req)
 	req.Header.Set("Content-Type", "application/x-ndjson")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return 0, 0, offset, err
+		return 0, 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return 0, 0, offset, fmt.Errorf("log append %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return 0, 0, fmt.Errorf("log append %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	var lr logAppendResp
 	if err := json.NewDecoder(resp.Body).Decode(&lr); err != nil {
-		return 0, 0, offset, err
+		return 0, 0, err
 	}
-	return lr.New, lr.Dup, consumed, nil
+	return lr.New, lr.Dup, nil
 }

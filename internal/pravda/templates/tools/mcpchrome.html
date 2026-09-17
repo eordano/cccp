@@ -1,0 +1,16 @@
+{{ define "tool-mcp-chrome" }}
+{{ $action := field . "action" }}{{ $url := field . "url" }}{{ $text := field . "text" }}{{ $query := field . "query" }}
+{{ $coord := .InputStrings "coordinate" }}{{ $blocks := .ResultBlocks }}
+{{ $title := $action }}{{ if not $title }}{{ if $url }}{{ $title = $url }}{{ else if $query }}{{ $title = $query }}{{ else if $text }}{{ $title = firstLine $text }}{{ else }}{{ $title = .Label }}{{ end }}{{ end }}
+<details>
+  <summary>
+    <div class="content-title">{{ $title }}{{ if and $action $url }} <span class="dim">{{ $url }}</span>{{ end }}{{ if $coord }} <code>({{ range $i, $c := $coord }}{{ if $i }}, {{ end }}{{ $c }}{{ end }})</code>{{ end }}</div>
+    <div class="content-preview">{{ if and $action $text }}{{ truncate (firstLine $text) 120 }}{{ else if and $action $query }}{{ truncate $query 120 }}{{ end }}{{ with field . "tabId" }} · tab {{ . }}{{ end }}{{ if $blocks }}{{ with index $blocks 0 }}{{ if .Text }} · {{ truncate (firstLine .Text) 100 }}{{ end }}{{ end }}{{ end }}{{ if not .HasResult }} · pending{{ end }}</div>
+  </summary>
+  <div class="content-details">
+    {{ if and $text (gt (lineCount $text) 1) }}<div class="dim">script</div><pre class="selectable" style="max-height:20em">{{ $text }}</pre>{{ end }}
+    {{ range $blocks }}{{ if .Image }}{{ if .Image.DataURL }}<img class="inline-image" src="{{ .Image.DataURL }}" alt="screenshot" loading="lazy" style="display:block;max-width:100%;max-height:30em;margin:0.4rem 0;border-radius:4px">{{ else }}<div class="dim">[image]</div>{{ end }}{{ else }}<pre class="selectable" style="max-height:20em">{{ .Text }}</pre>{{ end }}{{ end }}
+    {{ if not $blocks }}<pre class="selectable">{{ if .HasResult }}No output{{ else }}Running...{{ end }}</pre>{{ end }}
+  </div>
+</details>
+{{ end }}

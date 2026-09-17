@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/eordano/cccp/internal/sae"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,6 +18,9 @@ import (
 
 func runServe(ctx context.Context, args []string) error {
 	fs, cli := newFlagSet("serve")
+	saeDir := fs.String("sae-dir", "", "directory of daily SAE pages served under /sae/daily/")
+	saeCaptureURL := fs.String("sae-capture-url", "", "capture service base URL for asynchronous SAE scoring")
+	saeModelsDir := fs.String("sae-models-dir", "", "directory of SAE weights and original scales, keyed by encoder SHA256")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -42,14 +46,30 @@ func runServe(ctx context.Context, args []string) error {
 	events := api.NewBroadcaster()
 	sqlStore := pravda.NewSQLiteStore(st, events)
 	watchSrv := pravda.NewWatchServer(sqlStore)
+	watchSrv.SaeDir = *saeDir
+	if ix, err := sae.New(st.DB()); err == nil {
+		watchSrv.Sae = ix
+		if *saeCaptureURL != "" || *saeModelsDir != "" {
+			scorer, err := sae.NewOnDemand(ix, sae.ScorerConfig{CaptureURL: *saeCaptureURL, ModelsDir: *saeModelsDir})
+			if err != nil {
+				return fmt.Errorf("configure SAE scoring: %w", err)
+			}
+			watchSrv.SaeScorer = scorer
+			go scorer.Start(ctx)
+		}
+	} else {
+		slog.Warn("sae index unavailable", "error", err)
+	}
 	go watchSrv.Run(ctx)
 
 	srv := &api.Server{
-		Store:  st,
-		Token:  cfg.Token,
-		Log:    logger,
-		Events: events,
-		Watch:  watchSrv.Routes(),
+		Store:     st,
+		Token:     cfg.Token,
+		PushToken: cfg.PushToken,
+		Log:       logger,
+		Events:    events,
+		Watch:     watchSrv.Routes(),
+		SaeDir:    *saeDir,
 	}
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,

@@ -1,0 +1,10 @@
+{{ define "tool-StructuredOutput" }}
+{{ $keys := .InputKeys }}
+<details>
+  <summary>
+    <div class="content-title">Structured output{{ if $keys }} · {{ range $i, $k := $keys }}{{ if $i }}, {{ end }}{{ $k }}{{ end }}{{ end }}</div>
+    <div class="content-preview">{{ if .HasResult }}{{ truncate (firstLine (resultText .ResultContent)) 160 }}{{ else }}pending{{ end }}</div>
+  </summary>
+  <pre class="content-details selectable" style="max-height:30em">{{ json .Input }}</pre>
+</details>
+{{ end }}

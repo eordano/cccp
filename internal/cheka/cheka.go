@@ -3,6 +3,7 @@ package cheka
 import (
 	"math"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -20,58 +21,170 @@ type pattern struct {
 	kind    string
 	re      *regexp.Regexp
 	generic bool
+	hints   []string
+	ci      bool
+	before  int
+	after   int
+}
+
+const (
+	windowKey  = 8192
+	windowJWT  = 16384
+	windowKV   = 512
+	hexRunMin  = 65
+	smallLine  = 4096
+	mergeSlack = 64
+)
+
+type span struct{ start, end int }
+
+func hintAt(hay, h string, ci bool, lower *string, line string) func(from int) int {
+	return func(from int) int {
+		if from >= len(hay) {
+			return -1
+		}
+		src := hay
+		if ci {
+			if *lower == "" {
+				*lower = strings.ToLower(line)
+			}
+			src = *lower
+		}
+		i := strings.Index(src[from:], h)
+		if i < 0 {
+			return -1
+		}
+		return from + i
+	}
+}
+
+func hexRuns(line string) []span {
+	var out []span
+	run := 0
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
+			run++
+			continue
+		}
+		if run >= hexRunMin {
+			out = append(out, span{i - run, i})
+		}
+		run = 0
+	}
+	if run >= hexRunMin {
+		out = append(out, span{len(line) - run, len(line)})
+	}
+	return out
+}
+
+func windows(line string, lower *string, p pattern) []span {
+	if len(line) <= smallLine || (len(p.hints) == 0 && p.kind != "hex_token") {
+		return []span{{0, len(line)}}
+	}
+	var ws []span
+	if p.kind == "hex_token" {
+		ws = hexRuns(line)
+	} else {
+		for _, h := range p.hints {
+			next := hintAt(line, h, p.ci, lower, line)
+			for i := next(0); i >= 0; i = next(i + 1) {
+				a, b := i-p.before, i+len(h)+p.after
+				if a < 0 {
+					a = 0
+				}
+				if b > len(line) {
+					b = len(line)
+				}
+				ws = append(ws, span{a, b})
+			}
+		}
+	}
+	if len(ws) < 2 {
+		return ws
+	}
+	sort.Slice(ws, func(i, j int) bool { return ws[i].start < ws[j].start })
+	merged := ws[:1]
+	for _, w := range ws[1:] {
+		last := &merged[len(merged)-1]
+		if w.start <= last.end+mergeSlack {
+			if w.end > last.end {
+				last.end = w.end
+			}
+			continue
+		}
+		merged = append(merged, w)
+	}
+	return merged
+}
+
+func matches(line string, lower *string, p pattern) [][]int {
+	var out [][]int
+	for _, w := range windows(line, lower, p) {
+		for _, loc := range p.re.FindAllStringSubmatchIndex(line[w.start:w.end], -1) {
+			adj := make([]int, len(loc))
+			for k, v := range loc {
+				if v >= 0 {
+					v += w.start
+				}
+				adj[k] = v
+			}
+			out = append(out, adj)
+		}
+	}
+	return out
 }
 
 var patterns = []pattern{
 
-	{"anthropic_key", regexp.MustCompile(`sk-ant-(?:api|admin)\d+-[A-Za-z0-9_\-]{80,}`), false},
+	{"anthropic_key", regexp.MustCompile(`sk-ant-(?:api|admin)\d+-[A-Za-z0-9_\-]{80,}`), false, []string{"sk-ant-"}, false, 0, 8192},
 
-	{"openai_key", regexp.MustCompile(`sk-(?:proj|svcacct|admin|None)[-_][A-Za-z0-9]{40,}`), false},
+	{"openai_key", regexp.MustCompile(`sk-(?:proj|svcacct|admin|None)[-_][A-Za-z0-9]{40,}`), false, []string{"sk-"}, false, 0, 8192},
 
-	{"openai_legacy_key", regexp.MustCompile(`sk-[A-Za-z0-9]{40,}`), false},
+	{"openai_legacy_key", regexp.MustCompile(`sk-[A-Za-z0-9]{40,}`), false, []string{"sk-"}, false, 0, 8192},
 
-	{"github_classic_token", regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{36}`), false},
+	{"github_classic_token", regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{36}`), false, []string{"ghp_", "gho_", "ghu_", "ghs_", "ghr_"}, false, 0, 64},
 
-	{"github_fine_grained_pat", regexp.MustCompile(`github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}`), false},
+	{"github_fine_grained_pat", regexp.MustCompile(`github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}`), false, []string{"github_pat_"}, false, 0, 128},
 
-	{"gitlab_token", regexp.MustCompile(`glpat-[A-Za-z0-9_\-]{20,}`), false},
+	{"gitlab_token", regexp.MustCompile(`glpat-[A-Za-z0-9_\-]{20,}`), false, []string{"glpat-"}, false, 0, 8192},
 
-	{"slack_webhook", regexp.MustCompile(`https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+`), false},
-	{"slack_token", regexp.MustCompile(`xox[baporsz]-\d+-\d+-[A-Za-z0-9\-]+`), false},
+	{"slack_webhook", regexp.MustCompile(`https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+`), false, []string{"hooks.slack.com"}, false, 16, 8192},
+	{"slack_token", regexp.MustCompile(`xox[baporsz]-\d+-\d+-[A-Za-z0-9\-]+`), false, []string{"xox"}, false, 0, 8192},
 
-	{"stripe_key", regexp.MustCompile(`(?:sk|rk|pk)_(?:live|test)_[0-9a-zA-Z]{24,}`), false},
+	{"stripe_key", regexp.MustCompile(`(?:sk|rk|pk)_(?:live|test)_[0-9a-zA-Z]{24,}`), false, []string{"_live_", "_test_"}, false, 4, 8192},
 
-	{"google_api_key", regexp.MustCompile(`AIza[0-9A-Za-z_\-]{35}`), false},
+	{"google_api_key", regexp.MustCompile(`AIza[0-9A-Za-z_\-]{35}`), false, []string{"AIza"}, false, 0, 64},
 
-	{"google_oauth_token", regexp.MustCompile(`ya29\.[0-9A-Za-z_\-]{20,}`), false},
+	{"google_oauth_token", regexp.MustCompile(`ya29\.[0-9A-Za-z_\-]{20,}`), false, []string{"ya29."}, false, 0, 8192},
 
-	{"huggingface_key", regexp.MustCompile(`hf_[A-Za-z0-9]{30,}`), false},
+	{"huggingface_key", regexp.MustCompile(`hf_[A-Za-z0-9]{30,}`), false, []string{"hf_"}, false, 0, 8192},
 
-	{"npm_token", regexp.MustCompile(`npm_[A-Za-z0-9]{36}`), false},
+	{"npm_token", regexp.MustCompile(`npm_[A-Za-z0-9]{36}`), false, []string{"npm_"}, false, 0, 64},
 
-	{"sendgrid_key", regexp.MustCompile(`SG\.[A-Za-z0-9_\-]{22}\.[A-Za-z0-9_\-]{43}`), false},
+	{"sendgrid_key", regexp.MustCompile(`SG\.[A-Za-z0-9_\-]{22}\.[A-Za-z0-9_\-]{43}`), false, []string{"SG."}, false, 0, 128},
 
-	{"aws_access_key", regexp.MustCompile(`(?:AKIA|ASIA)[0-9A-Z]{16}`), false},
+	{"aws_access_key", regexp.MustCompile(`(?:AKIA|ASIA)[0-9A-Z]{16}`), false, []string{"AKIA", "ASIA"}, false, 0, 32},
 
-	{"docker_hub_token", regexp.MustCompile(`dckr_pat_[A-Za-z0-9_\-]{20,}`), false},
+	{"docker_hub_token", regexp.MustCompile(`dckr_pat_[A-Za-z0-9_\-]{20,}`), false, []string{"dckr_pat_"}, false, 0, 8192},
 
-	{"digitalocean_token", regexp.MustCompile(`dop_v1_[a-f0-9]{64}`), false},
+	{"digitalocean_token", regexp.MustCompile(`dop_v1_[a-f0-9]{64}`), false, []string{"dop_v1_"}, false, 0, 128},
 
-	{"hasura_admin_secret", regexp.MustCompile(`hskey-auth-[a-zA-Z0-9]{20,}`), false},
+	{"hasura_admin_secret", regexp.MustCompile(`hskey-auth-[a-zA-Z0-9]{20,}`), false, []string{"hskey-auth-"}, false, 0, 8192},
 
-	{"synadia_token", regexp.MustCompile(`syt_[A-Za-z0-9_\-]{20,}`), false},
+	{"synadia_token", regexp.MustCompile(`syt_[A-Za-z0-9_\-]{20,}`), false, []string{"syt_"}, false, 0, 8192},
 
-	{"private_key", regexp.MustCompile(`-----BEGIN\s+(?:RSA\s+|EC\s+|OPENSSH\s+|DSA\s+)?PRIVATE\s+KEY-----`), false},
+	{"private_key", regexp.MustCompile(`-----BEGIN\s+(?:RSA\s+|EC\s+|OPENSSH\s+|DSA\s+)?PRIVATE\s+KEY-----`), false, []string{"-----BEGIN"}, false, 0, 128},
 
-	{"jwt", regexp.MustCompile(`eyJ[A-Za-z0-9_\-]{20,}\.eyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}`), false},
+	{"jwt", regexp.MustCompile(`eyJ[A-Za-z0-9_\-]{20,}\.eyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}`), false, []string{"eyJ"}, false, 0, 16384},
 
-	{"connection_string", regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.\-]*://[^:@\s/]{1,64}:([^@\s/]{1,256})@[^\s]{1,256}`), true},
+	{"connection_string", regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.\-]*://[^:@\s/]{1,64}:([^@\s/]{1,256})@[^\s]{1,256}`), true, []string{"://"}, false, 80, 600},
 
-	{"bearer", regexp.MustCompile(`(?i)Bearer\s+([A-Za-z0-9_\-.]{20,})`), true},
+	{"bearer", regexp.MustCompile(`(?i)Bearer\s+([A-Za-z0-9_\-.]{20,})`), true, []string{"bearer"}, true, 0, 512},
 
-	{"key_value", regexp.MustCompile(`(?i)(?:PASSWORD|PASSWD|TOKEN|SECRET|API[_ ]?KEY|ACCESS[_ ]?KEY|PRIVATE[_ ]?KEY|AUTH[_ ]?TOKEN)\s*[=:]\s*["']?([^\s"'\n]{8,})`), true},
+	{"key_value", regexp.MustCompile(`(?i)(?:PASSWORD|PASSWD|TOKEN|SECRET|API[_ ]?KEY|ACCESS[_ ]?KEY|PRIVATE[_ ]?KEY|AUTH[_ ]?TOKEN)\s*[=:]\s*["']?([^\s"'\n]{8,})`), true, []string{"password", "passwd", "token", "secret", "api_key", "api key", "apikey", "access_key", "access key", "accesskey", "private_key", "private key", "privatekey", "auth_token", "auth token", "authtoken"}, true, 0, 512},
 
-	{"hex_token", regexp.MustCompile(`(?i)[0-9a-f]{65,}`), true},
+	{"hex_token", regexp.MustCompile(`(?i)[0-9a-f]{65,}`), true, nil, true, 0, 0},
 }
 
 var knownExamples = map[string]bool{
@@ -262,7 +375,6 @@ func scanLine(path, line string, lineNum int) []Finding {
 	if len(line) == 0 {
 		return nil
 	}
-	type span struct{ start, end int }
 	var claimed []span
 	overlaps := func(a span) bool {
 		for _, b := range claimed {
@@ -272,10 +384,10 @@ func scanLine(path, line string, lineNum int) []Finding {
 		}
 		return false
 	}
+	var lower string
 	var out []Finding
 	for _, p := range patterns {
-		locs := p.re.FindAllStringSubmatchIndex(line, -1)
-		for _, loc := range locs {
+		for _, loc := range matches(line, &lower, p) {
 			matchStart, matchEnd := loc[0], loc[1]
 
 			if overlaps(span{matchStart, matchEnd}) {
@@ -304,14 +416,14 @@ func scanLine(path, line string, lineNum int) []Finding {
 }
 
 func RedactLine(line string) string {
-	type span struct {
+	type kspan struct {
 		start, end int
 		kind       string
 	}
-	var spans []span
+	var spans []kspan
+	var lower string
 	for _, p := range patterns {
-		locs := p.re.FindAllStringSubmatchIndex(line, -1)
-		for _, loc := range locs {
+		for _, loc := range matches(line, &lower, p) {
 			matched := line[loc[0]:loc[1]]
 			evalText := matched
 			if len(loc) >= 4 && loc[2] >= 0 {
@@ -320,7 +432,7 @@ func RedactLine(line string) string {
 			if isBenign(evalText, matched, !p.generic) {
 				continue
 			}
-			spans = append(spans, span{loc[0], loc[1], p.kind})
+			spans = append(spans, kspan{loc[0], loc[1], p.kind})
 		}
 	}
 	if len(spans) == 0 {

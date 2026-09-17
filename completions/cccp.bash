@@ -1,5 +1,3 @@
-# bash completion for cccp
-# Source from /etc/bash_completion.d/ or ~/.local/share/bash-completion/completions/cccp
 
 _cccp() {
     local cur prev words cword split
@@ -15,7 +13,6 @@ _cccp() {
     local commands="serve push pull watch explore host-id help"
     local global_flags="--dir --url --server-url --token --addr --address --port --db --database --db-path --config -h --help"
 
-    # Find the subcommand.
     local cmd=""
     local i
     for (( i=1; i < cword; i++ )); do
@@ -29,7 +26,6 @@ _cccp() {
         return 0
     fi
 
-    # Value completion for flags that take a path or opaque argument.
     case "$prev" in
         --dir)
             COMPREPLY=( $(compgen -d -- "$cur") )
@@ -44,7 +40,6 @@ _cccp() {
             ;;
     esac
 
-    # Watch sub-subcommands.
     if [[ $cmd == watch ]]; then
         local watch_sub=""
         for (( i++; i < cword; i++ )); do

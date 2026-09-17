@@ -37,6 +37,7 @@ func (s *Server) handleLogAppend(w http.ResponseWriter, r *http.Request) {
 
 	var resp logAppendResponse
 	changedPaths := map[string]struct{}{}
+	var lines []store.LogLine
 	scanner := bufio.NewScanner(r.Body)
 	scanner.Buffer(make([]byte, scanBufInit), maxScanLine)
 	for scanner.Scan() {
@@ -54,28 +55,30 @@ func (s *Server) handleLogAppend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		sum := sha256.Sum256([]byte(e.Line))
-		l := store.LogLine{
+		lines = append(lines, store.LogLine{
 			Path:          e.Path,
 			LineHash:      hex.EncodeToString(sum[:]),
 			Contents:      []byte(e.Line),
 			SuggestedTime: e.SuggestedTime,
 			FirstHost:     hostID,
-		}
-		ins, err := s.Store.AppendLogLine(ctx, l)
-		if err != nil {
-			httpError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if ins {
-			resp.New++
-			changedPaths[e.Path] = struct{}{}
-		} else {
-			resp.Dup++
-		}
+		})
 	}
 	if err := scanner.Err(); err != nil {
 		httpError(w, http.StatusBadRequest, "read body: "+err.Error())
 		return
+	}
+	inserted, err := s.Store.AppendLogLines(ctx, lines)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for i, ins := range inserted {
+		if ins {
+			resp.New++
+			changedPaths[lines[i].Path] = struct{}{}
+		} else {
+			resp.Dup++
+		}
 	}
 	if resp.New > 0 {
 		paths := make([]string, 0, len(changedPaths))

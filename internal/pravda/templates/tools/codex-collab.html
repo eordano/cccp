@@ -1,0 +1,77 @@
+{{ define "codex-collab-message" }}
+{{ $target := field . "target" }}
+{{ $msg := field . "message" }}
+{{ $out := resultText .ResultContent }}
+<details>
+  <summary>
+    <div class="content-title">→ {{ $target }}</div>
+    <div class="content-preview">{{ truncate (firstLine $msg) 140 }}</div>
+  </summary>
+  <div class="content-details">
+    <div class="agent-result-body">{{ markdown $msg }}</div>
+    {{ if $out }}<div class="dim">Result</div><pre class="selectable">{{ $out }}</pre>{{ end }}
+  </div>
+</details>
+{{ end }}
+
+{{ define "tool-send_message" }}{{ template "codex-collab-message" . }}{{ end }}
+{{ define "tool-followup_task" }}{{ template "codex-collab-message" . }}{{ end }}
+
+{{ define "tool-spawn_agent" }}
+{{ $task := field . "task_name" }}
+{{ $fork := field . "fork_turns" }}
+{{ $msg := field . "message" }}
+{{ $out := resultText .ResultContent }}
+<details>
+  <summary>
+    <div class="content-title">{{ if $task }}{{ $task }}{{ else }}spawn agent{{ end }}{{ if $out }} <code class="agent-id">{{ truncate $out 60 }}</code>{{ end }}</div>
+    <div class="content-preview">{{ if $fork }}fork: {{ $fork }} · {{ end }}{{ truncate (firstLine $msg) 120 }}</div>
+  </summary>
+  <div class="content-details">
+    <div class="agent-result-body">{{ markdown $msg }}</div>
+  </div>
+</details>
+{{ end }}
+
+{{ define "tool-wait_agent" }}
+{{ $timeout := field . "timeout_ms" }}
+{{ $out := resultText .ResultContent }}
+<div class="content-title">wait for agents{{ if $timeout }} · {{ $timeout }} ms{{ end }}</div>
+{{ if $out }}<div class="content-preview">{{ truncate (firstLine $out) 160 }}</div>{{ else if not .HasResult }}<div class="content-preview dim">waiting...</div>{{ end }}
+{{ end }}
+
+{{ define "tool-wait" }}
+{{ $cell := field . "cell_id" }}
+{{ $out := resultText .ResultContent }}
+<details>
+  <summary>
+    <div class="content-title">wait on cell {{ $cell }}</div>
+    <div class="content-preview">{{ if $out }}{{ truncate (firstLine $out) 160 }}{{ else if .HasResult }}(no output){{ else }}waiting...{{ end }}</div>
+  </summary>
+  {{ if $out }}<pre class="content-details selectable" style="max-height:30em">{{ $out }}</pre>{{ end }}
+</details>
+{{ end }}
+
+{{ define "tool-list_agents" }}
+{{ $out := resultText .ResultContent }}
+<details>
+  <summary>
+    <div class="content-title">list agents</div>
+  </summary>
+  <pre class="content-details selectable">{{ if $out }}{{ $out }}{{ else }}(no output){{ end }}</pre>
+</details>
+{{ end }}
+
+{{ define "tool-interrupt_agent" }}
+{{ $target := field . "target" }}
+{{ $out := resultText .ResultContent }}
+<div class="content-title">interrupt {{ $target }}</div>
+{{ if $out }}<div class="content-preview">{{ truncate $out 160 }}</div>{{ end }}
+{{ end }}
+
+{{ define "tool-sleep" }}
+{{ $desc := field . "description" }}
+{{ $out := resultText .ResultContent }}
+<div class="content-title">{{ if $desc }}{{ $desc }}{{ else }}sleep{{ end }}</div>
+{{ if $out }}<div class="content-preview">{{ truncate (firstLine $out) 160 }}</div>{{ end }}
+{{ end }}

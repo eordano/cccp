@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -32,11 +33,11 @@ func testSetup(t *testing.T) (url string, rootA, rootB string, a, b *agent.Confi
 	t.Cleanup(ts.Close)
 	rootA = t.TempDir()
 	rootB = t.TempDir()
-	a, err = agent.New(rootA, ts.URL, "tok")
+	a, err = agent.New(rootA, ts.URL, "tok", "claude")
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err = agent.New(rootB, ts.URL, "tok")
+	b, err = agent.New(rootB, ts.URL, "tok", "claude")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,5 +148,54 @@ func TestSerializer_PullTriggerRunsPushFirstWhenDirty(t *testing.T) {
 	}
 	if got := read(t, rootA, "memory/MEMORY.md"); got != "edit saved during debounce window" {
 		t.Errorf("edit was not pushed before pull; host A has %q", got)
+	}
+}
+
+// No filesystem event follows the failure: reconciliation alone must recover.
+func TestSerializer_PushOnlyRetriesIdleUpload(t *testing.T) {
+	var calls atomic.Int32
+	delivered := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/log/append" {
+			t.Errorf("push-only requested %s", r.URL.Path)
+			http.Error(w, "unexpected request", 500)
+			return
+		}
+		if calls.Add(1) == 1 {
+			http.Error(w, "temporary outage", 503)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"new":1,"dup":0}`)
+		select {
+		case delivered <- struct{}{}:
+		default:
+		}
+	}))
+	defer server.Close()
+	root := t.TempDir()
+	write(t, root, "history.jsonl", "{\"message\":\"last session line\"}\n")
+	client, err := agent.New(root, server.URL, "tok", "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	defer func() { cancel(); <-done }()
+	triggers := make(chan kind, 1)
+	triggers <- kindPush
+	var dirty atomic.Bool
+	go func() {
+		defer close(done)
+		runSerializer(ctx, triggers, &dirty, Options{
+			Agent: client, Root: root, PushOnly: true,
+			ReconcileInterval: 20 * time.Millisecond,
+			Log:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+		})
+	}()
+	select {
+	case <-delivered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("idle upload was never retried")
 	}
 }

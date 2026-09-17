@@ -1,5 +1,14 @@
 {{ define "tool-Read" }}
 {{ $fp := field . "file_path" }}
+{{ with .ImageResult }}
+<details open>
+  <summary>
+    <div class="content-title">{{ basename $fp }}</div>
+    <div class="content-preview">image{{ if .W }} {{ .W }}×{{ .H }}{{ end }}{{ if .Size }} · {{ formatSize .Size }}{{ end }}</div>
+  </summary>
+  {{ if .Image.DataURL }}<img class="inline-image" src="{{ .Image.DataURL }}" alt="[image {{ .W }}×{{ .H }}]" loading="lazy" style="display:block;max-width:100%;max-height:30em;margin:0.4rem 0;border-radius:4px">{{ else }}<div class="content-details dim">[image{{ if .W }} {{ .W }}×{{ .H }}{{ end }}]</div>{{ end }}
+</details>
+{{ else }}
 {{ $body := resultText .ResultContent }}
 <details>
   <summary>
@@ -8,4 +17,5 @@
   </summary>
   <pre class="content-details selectable" style="max-height:30em">{{ truncate $body 20000 }}</pre>
 </details>
+{{ end }}
 {{ end }}

@@ -1,0 +1,23 @@
+{{ define "tool-Monitor" }}{{ template "tool-brief" . }}{{ end }}
+{{ define "tool-TaskStop" }}{{ template "tool-brief" . }}{{ end }}
+{{ define "tool-TaskOutput" }}{{ template "tool-brief" . }}{{ end }}
+{{ define "tool-SendMessage" }}{{ template "tool-brief" . }}{{ end }}
+{{ define "tool-ListAgents" }}{{ template "tool-brief" . }}{{ end }}
+{{ define "tool-PushNotification" }}{{ template "tool-brief" . }}{{ end }}
+{{ define "tool-EnterPlanMode" }}{{ template "tool-brief" . }}{{ end }}
+{{ define "tool-ExitPlanMode" }}{{ template "tool-brief" . }}{{ end }}
+
+{{ define "tool-brief" }}
+{{ $title := .BriefTitle }}
+{{ $out := .ResultTextPlain }}{{ if eq .Name "TaskOutput" }}{{ with .ResultPath "task" "output" }}{{ $out = . }}{{ end }}{{ end }}
+<details>
+  <summary>
+    <div class="content-title">{{ if $title }}{{ $title }}{{ else }}{{ .Name }}{{ end }}</div>
+    <div class="content-preview">{{ if .HasResult }}{{ with .ResultField "message" }}{{ truncate (firstLine .) 160 }}{{ else }}{{ truncate (firstLine $out) 160 }}{{ end }}{{ else }}pending{{ end }}</div>
+  </summary>
+  <div class="content-details">
+    {{ if and .Input (ne (len .Input) 2) }}<div class="dim">Input</div><pre class="selectable">{{ json .Input }}</pre>{{ end }}
+    <div class="dim">Result</div><pre class="selectable" style="max-height:30em">{{ if $out }}{{ $out }}{{ else }}No output{{ end }}</pre>
+  </div>
+</details>
+{{ end }}

@@ -1,0 +1,8 @@
+{{ define "event-bash-input" }}<div class="cmd-row{{ if gt (lineCount .Text) 1 }} cmd-row-multiline{{ end }}"><code class="cmd-code">{{ .Text }}</code><button class="copy-btn cmd-copy" type="button" data-copy="{{ .Text }}" title="Copy command">📋</button></div>{{ end }}
+
+{{ define "event-bash-output" }}
+{{ $out := stripAnsi .Text }}{{ $err := stripAnsi .Stderr }}
+{{ if and (not $out) (not $err) }}<div class="content-preview">(no output)</div>{{ end }}
+{{ if $out }}{{ $lines := lineCount $out }}{{ if and (le $lines 1) (lt (len $out) 161) }}<div class="content-title"><code>{{ $out }}</code></div>{{ else }}<details><summary class="content-preview">stdout · {{ $lines }} lines · {{ len $out }} chars</summary><pre class="content-details selectable" style="max-height:30em">{{ $out }}</pre></details>{{ end }}{{ end }}
+{{ if $err }}{{ $elines := lineCount $err }}{{ if and (le $elines 1) (lt (len $err) 161) }}<div class="content-preview stderr-line">stderr: {{ $err }}</div>{{ else }}<details><summary class="content-preview stderr-line">stderr · {{ $elines }} lines · {{ len $err }} chars</summary><pre class="content-details selectable stderr-details" style="max-height:30em">{{ $err }}</pre></details>{{ end }}{{ end }}
+{{ end }}

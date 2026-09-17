@@ -1,1 +1,37 @@
-{{ define "event-system" }}<details><summary class="content-preview">system</summary><pre class="content-details selectable">{{ json .Data }}</pre></details>{{ end }}
+{{ define "event-system" }}
+{{ if eq .Subtype "away_summary" }}
+  <div class="message-content">{{ markdown .Text }}</div>
+{{ else if eq .Subtype "compact_boundary" }}
+  <div class="content-title">{{ if .Text }}{{ .Text }}{{ else }}Conversation compacted{{ end }}</div>
+  <div class="content-preview">{{ if .Trigger }}{{ .Trigger }} · {{ end }}{{ if .PreTokens }}{{ formatCount .PreTokens }} → {{ formatCount .PostTokens }} tokens{{ end }}{{ if .DurationMs }} · {{ formatMs .DurationMs }}{{ end }}</div>
+{{ else if eq .Subtype "model_refusal_no_fallback" }}
+  <div class="content-title">Request refused{{ if .Status }} · {{ .Status }}{{ end }}</div>
+  {{ if .Text }}<div class="content-preview">{{ .Text }}</div>{{ end }}
+  {{ if .Mode }}<div class="dim">model: <code>{{ .Mode }}</code></div>{{ end }}
+{{ else if eq .Subtype "model_refusal_fallback" }}
+  <div class="content-title">Request refused{{ if .Status }} · {{ .Status }}{{ end }} · falling back</div>
+  <div class="content-preview"><code>{{ .Mode }}</code> → <code>{{ .ToModel }}</code>{{ if .Direction }} · {{ .Direction }}{{ end }}{{ if .Retracted }} · {{ .Retracted }} message{{ if ne .Retracted 1 }}s{{ end }} retracted{{ end }}</div>
+  {{ if .Text }}<details><summary class="content-preview">explanation</summary><div class="content-details">{{ .Text }}</div></details>{{ end }}
+{{ else if eq .Subtype "model_fallback" }}
+  <div class="content-title">Model fallback</div>
+  <div class="content-preview"><code>{{ .Mode }}</code> → <code>{{ .ToModel }}</code></div>
+{{ else if eq .Subtype "bridge_status" }}
+  <div class="content-title">{{ if .URL }}<a href="{{ .URL }}" target="_blank" rel="noopener">{{ .URL }}</a>{{ else }}Remote control{{ end }}</div>
+  {{ if .Text }}<div class="content-preview">{{ .Text }}</div>{{ end }}
+{{ else if eq .Subtype "informational" }}
+  <div class="content-title">ℹ️ {{ .Text }}</div>
+  {{ if .Level }}<div class="content-preview{{ if ne .Level "info" }} stderr-line{{ end }}">{{ .Level }}</div>{{ end }}
+{{ else if eq .Subtype "goal" }}
+  <div class="content-title">{{ if .Text }}{{ truncate (firstLine .Text) 160 }}{{ else }}Goal update{{ end }}</div>
+  {{ if .Status }}<div class="content-preview">{{ .Status }}</div>{{ end }}
+  <details><summary class="content-preview">details</summary><pre class="content-details selectable" style="max-height:20em">{{ json .Data }}</pre></details>
+{{ else if eq .Subtype "stop_hook_summary" }}
+  <div class="content-preview">{{ .HookCount }} stop hook{{ if ne .HookCount 1 }}s{{ end }} ran</div>
+  <details><summary class="content-preview">details</summary><pre class="content-details selectable" style="max-height:20em">{{ json .Data }}</pre></details>
+{{ else if .Text }}
+  <div class="content-preview">{{ if .Subtype }}{{ .Subtype }}{{ else }}system{{ end }}</div>
+  {{ $lines := lineCount .Text }}{{ if and (le $lines 1) (lt (len .Text) 161) }}<div class="content-title">{{ .Text }}</div>{{ else }}<details><summary class="content-preview">{{ $lines }} lines</summary><pre class="content-details selectable" style="max-height:20em">{{ .Text }}</pre></details>{{ end }}
+{{ else }}
+  <details><summary class="content-preview">{{ if .Subtype }}{{ .Subtype }}{{ else }}system{{ end }}</summary><pre class="content-details selectable">{{ json .Data }}</pre></details>
+{{ end }}
+{{ end }}

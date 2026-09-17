@@ -40,6 +40,80 @@
 {{ else if eq .Subtype "deferred_tools_delta" }}
   {{ $added := rawList .Attach "addedNames" }}{{ $removed := rawList .Attach "removedNames" }}
   <div class="content-preview">{{ len $added }} added{{ if $removed }}, {{ len $removed }} removed{{ end }}</div>
+{{ else if eq .Subtype "total_tokens_reminder" }}
+  <div class="content-preview">{{ if .TokensLeft }}{{ formatCount .TokensLeft }} tokens left{{ else }}{{ rawField .Attach "text" }}{{ end }}</div>
+{{ else if eq .Subtype "hook_success" }}
+  {{ $out := rawField .Attach "stdout" }}{{ $err := rawField .Attach "stderr" }}{{ $body := rawField .Attach "content" }}
+  <div class="content-title">{{ rawField .Attach "hookName" }}</div>
+  {{ if $err }}{{ $elines := lineCount $err }}{{ if and (le $elines 1) (lt (len $err) 161) }}<div class="content-preview stderr-line">{{ $err }}</div>{{ else }}<details><summary class="content-preview stderr-line">stderr · {{ $elines }} lines</summary><pre class="content-details selectable stderr-details" style="max-height:20em">{{ $err }}</pre></details>{{ end }}{{ end }}
+  {{ if $out }}{{ $olines := lineCount $out }}{{ if and (le $olines 1) (lt (len $out) 161) }}<div class="content-preview">{{ $out }}</div>{{ else }}<details><summary class="content-preview">stdout · {{ $olines }} lines</summary><pre class="content-details selectable" style="max-height:20em">{{ $out }}</pre></details>{{ end }}{{ end }}
+  {{ if and (not $out) (not $err) }}{{ if $body }}<div class="content-preview">{{ truncate $body 160 }}</div>{{ else }}<div class="content-preview">ok</div>{{ end }}{{ end }}
+{{ else if eq .Subtype "hook_additional_context" }}
+  <div class="content-title">{{ rawField .Attach "hookName" }}</div>
+  {{ range rawList .Attach "content" }}<div class="content-preview">{{ decodeString . }}</div>{{ end }}
+{{ else if eq .Subtype "hook_system_message" }}
+  <div class="content-title">{{ rawField .Attach "hookName" }}</div>
+  <div class="content-preview">{{ rawField .Attach "content" }}</div>
+{{ else if eq .Subtype "date_change" }}
+  <div class="content-preview">Date changed to {{ if .Text }}{{ .Text }}{{ else }}{{ rawField .Attach "newDate" }}{{ end }}</div>
+{{ else if eq .Subtype "command_permissions" }}
+  {{ $tools := rawList .Attach "allowedTools" }}
+  {{ if $tools }}<details><summary class="content-preview">{{ len $tools }} allowed tool{{ if ne (len $tools) 1 }}s{{ end }}</summary><ul class="content-details todo-list">{{ range $tools }}<li>{{ decodeString . }}</li>{{ end }}</ul></details>{{ else }}<div class="content-preview">no pre-allowed tools</div>{{ end }}
+{{ else if eq .Subtype "auto_mode" }}
+  <div class="content-preview">{{ if index $a "bypass" }}bypass{{ else if index $a "steerOnly" }}steer-only{{ else }}auto{{ end }}{{ if index $a "bashFirst" }} · bash-first{{ end }}</div>
+{{ else if eq .Subtype "goal_status" }}
+  <div class="content-preview">goal {{ if index $a "met" }}met ✅{{ else }}not met{{ end }}</div>
+  {{ $cond := rawField .Attach "condition" }}{{ if $cond }}<details><summary class="content-preview">condition</summary><pre class="content-details selectable" style="max-height:15em">{{ $cond }}</pre></details>{{ end }}
+{{ else if eq .Subtype "nested_memory" }}
+  {{ $body := rawPath .Attach "content" "content" }}
+  <details><summary><div class="content-title">{{ rawField .Attach "path" }}</div><div class="content-preview">{{ lineCount $body }} lines</div></summary><pre class="content-details selectable" style="max-height:30em">{{ truncate $body 40000 }}</pre></details>
+{{ else if eq .Subtype "invoked_skills" }}
+  {{ $skills := rawList .Attach "skills" }}
+  <div class="content-preview">{{ range $i, $s := $skills }}{{ if $i }}, {{ end }}{{ rawField $s "name" }}{{ end }}</div>
+{{ else if eq .Subtype "mcp_instructions_delta" }}
+  {{ $added := rawList .Attach "addedNames" }}{{ $removed := rawList .Attach "removedNames" }}
+  <div class="content-preview">{{ range $i, $n := $added }}{{ if $i }}, {{ end }}+{{ decodeString $n }}{{ end }}{{ if $removed }}{{ if $added }} · {{ end }}{{ len $removed }} removed{{ end }}{{ if and (not $added) (not $removed) }}no changes{{ end }}</div>
+{{ else if eq .Subtype "agent_listing_delta" }}
+  {{ $added := rawList .Attach "addedTypes" }}{{ $removed := rawList .Attach "removedTypes" }}
+  <div class="content-preview">{{ range $i, $n := $added }}{{ if $i }}, {{ end }}+{{ decodeString $n }}{{ end }}{{ if $removed }}{{ if $added }} · {{ end }}{{ len $removed }} removed{{ end }}{{ if and (not $added) (not $removed) }}no changes{{ end }}</div>
+{{ else if eq .Subtype "plan_mode" }}
+  <div class="content-preview">Plan mode{{ with rawField .Attach "planFilePath" }} · {{ basename . }}{{ end }}{{ if not (index $a "planExists") }} (no plan file yet){{ end }}</div>
+{{ else if eq .Subtype "remote_session_change" }}
+  {{ $commit := rawField .Attach "commit" }}{{ $pr := rawField .Attach "pr" }}
+  <div class="content-title">{{ if .URL }}<a href="{{ .URL }}" target="_blank" rel="noopener">{{ .URL }}</a>{{ else }}Remote session{{ end }}</div>
+  <div class="content-preview">attribution trailers{{ if index $a "sendUserFileHint" }} · SendUserFile hint{{ end }}</div>
+  {{ if or $commit $pr }}<details><summary class="content-preview">trailers</summary><div class="content-details">{{ if $commit }}<div class="dim">commit</div><pre class="selectable">{{ $commit }}</pre>{{ end }}{{ if $pr }}<div class="dim">pull request</div><pre class="selectable">{{ $pr }}</pre>{{ end }}</div></details>{{ end }}
+{{ else if eq .Subtype "instructions" }}
+  {{ $files := .InstructionFiles }}
+  <div class="content-title">{{ len $files }} instruction file{{ if ne (len $files) 1 }}s{{ end }}</div>
+  {{ range $files }}
+  <details><summary class="content-preview">{{ if .Type }}{{ .Type }} · {{ end }}{{ .Path }} · {{ lineCount .Content }} lines</summary><pre class="content-details selectable" style="max-height:30em">{{ truncate .Content 40000 }}</pre></details>
+  {{ end }}
+{{ else if eq .Subtype "prompt_snapshot" }}
+  {{ $ps := .PromptSnapshot }}
+  <details><summary class="content-preview">system prompt · {{ $ps.Sections }} section{{ if ne $ps.Sections 1 }}s{{ end }} · {{ formatSize $ps.Bytes }}{{ if $ps.Tools }} · {{ $ps.Tools }} tools{{ end }}</summary>
+  <div class="content-details">{{ range $i, $p := $ps.Parts }}<div class="dim">section {{ add1 $i }}</div><pre class="selectable" style="max-height:20em">{{ truncate $p 8000 }}</pre>{{ end }}</div></details>
+{{ else if eq .Subtype "deferred_tools_record" }}
+  {{ $names := .DeferredToolNames }}
+  <div class="content-preview">{{ len $names }} tool schema{{ if ne (len $names) 1 }}s{{ end }}{{ if $names }}: {{ range $i, $n := $names }}{{ if $i }}, {{ end }}{{ $n }}{{ end }}{{ end }}</div>
+{{ else if eq .Subtype "read_truncation_notice" }}
+  <div class="content-title stderr-line">⚠️ Read truncated</div>
+  <div class="content-preview">{{ .Text }}</div>
+  {{ if .ToolUseID }}<div class="dim">tool use <code>{{ .ToolUseID }}</code></div>{{ end }}
+{{ else if eq .Subtype "auto_mode_exit" }}
+  <div class="content-preview">exited auto mode{{ if index $a "bashFirst" }} · was bash-first{{ end }}{{ if index $a "steerOnly" }} · was steer-only{{ end }}</div>
+{{ else if eq .Subtype "dynamic_skill" }}
+  {{ $names := .AttachStrings "skillNames" }}
+  <div class="content-title">{{ range $i, $n := $names }}{{ if $i }}, {{ end }}{{ $n }}{{ end }}</div>
+  <div class="content-preview">{{ with rawField .Attach "displayPath" }}{{ . }}{{ else }}{{ rawField .Attach "skillDir" }}{{ end }}</div>
+{{ else if eq .Subtype "thinking_stripped" }}
+  <div class="content-preview">thinking stripped{{ with rawField .Attach "scope" }} · scope {{ . }}{{ end }}</div>
+{{ else if eq .Subtype "structured_output" }}
+  {{ $so := .StructuredOutput }}
+  <div class="content-title">{{ if $so.HasPassed }}{{ if $so.Passed }}✅ passed{{ else }}❌ failed{{ end }}{{ else }}Structured output{{ end }}{{ if $so.Problems }} · {{ len $so.Problems }} problem{{ if ne (len $so.Problems) 1 }}s{{ end }}{{ end }}</div>
+  {{ if $so.Summary }}<div class="content-preview">{{ truncate (firstLine $so.Summary) 200 }}</div>{{ else if $so.Keys }}<div class="content-preview">{{ range $i, $k := $so.Keys }}{{ if $i }}, {{ end }}{{ $k }}{{ end }}</div>{{ end }}
+  {{ if $so.Problems }}<ul class="content-details todo-list">{{ range $so.Problems }}<li>❌ {{ . }}</li>{{ end }}</ul>{{ end }}
+  <details><summary class="content-preview">data</summary><pre class="content-details selectable" style="max-height:30em">{{ json .Attach }}</pre></details>
 {{ else }}
   <div class="content-preview">{{ .Subtype }}</div>
   <details><summary class="content-preview">raw</summary><pre class="content-details selectable">{{ json .Attach }}</pre></details>

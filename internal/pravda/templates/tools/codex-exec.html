@@ -1,0 +1,16 @@
+{{ define "tool-exec" }}
+{{ $code := field . "code" }}
+{{ $desc := field . "description" }}
+{{ $out := resultText .ResultContent }}
+<details>
+  <summary>
+    <div class="content-title">{{ if $desc }}{{ $desc }}{{ else }}exec{{ end }}</div>
+    <div class="content-preview">{{ lineCount $code }} lines of JS{{ if $out }} · {{ truncate (firstLine $out) 100 }}{{ end }}</div>
+  </summary>
+  <div class="content-details">
+    <pre class="cmd-code selectable" style="max-height:30em">{{ $code }}</pre>
+    <div class="dim">Result</div>
+    {{ if $out }}<pre class="selectable" style="max-height:30em">{{ $out }}</pre>{{ else if .HasResult }}<pre>(no output)</pre>{{ else }}<div class="dim">Running...</div>{{ end }}
+  </div>
+</details>
+{{ end }}

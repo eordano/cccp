@@ -5,11 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{{ .Title }}</title>
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/sae.css">
+  <link rel="stylesheet" href="/loading.css">
+  <script src="/loading.js" defer></script>
   <script src="/htmx.min.js" defer></script>
   <script src="/htmx-ws.js" defer></script>
   <script src="/pravda.js" defer></script>
+  <script src="/sae.js" defer></script>
 </head>
 <body class="{{range .HiddenKinds}}hide-{{ . | kindClass }} {{end}}" hx-boost="true" hx-history="false">
+  <input type="checkbox" id="nav-toggle" class="nav-toggle-input" aria-hidden="true">
+  <label class="nav-scrim" for="nav-toggle" aria-hidden="true"></label>
   <div class="app-container">
     {{ template "sidebar" . }}
     <main class="main-content">
@@ -24,10 +30,14 @@
   {{ template "inspector" .Inspector }}
 {{ else if .Session }}
   {{ template "session-header" . }}
-  {{ template "timeline" .Session }}
+  {{ template "env-panel" . }}
+  {{ template "timeline" .Timeline }}
+  {{ if .Sae }}{{ template "sae-strip" .Sae }}{{ end }}
+  <div id="session-path" data-session-path="{{ .CurrentPath }}" hidden></div>
   {{ template "live-connect" . }}
 {{ else }}
   <header class="header">
+    {{ template "sidebar-toggle" }}
     <div class="header-session">
       <div class="session-title">Sessions</div>
     </div>
@@ -35,25 +45,105 @@
   </header>
   <div class="timeline-wrap">
     <div class="welcome-search">
-      <input type="search" class="search-input search-main-input"
-             placeholder="Search conversations..." autofocus
-             value="{{ .SearchQuery }}"
-             autocomplete="off" spellcheck="false">
+      <form method="get" action="/">
+        <input type="search" name="q" class="search-input search-main-input"
+               placeholder="Search conversations..." autofocus
+               value="{{ .SearchQuery }}"
+               autocomplete="off" spellcheck="false">
+      </form>
+      {{ template "agent-chips" . }}
+      {{ template "group-control" . }}
       <div class="welcome-sessions">
-        {{ $current := .CurrentPath }}
-        {{ range .FlatList }}{{ template "flat-row" (dict "item" . "current" $current) }}{{ end }}
+        {{ template "session-list" . }}
       </div>
+      {{ template "pager" .Pager }}
     </div>
   </div>
 {{ end }}
 {{ end }}
 
+{{ define "event-workflow" }}
+<div class="workflow-event">
+  {{ if .SubAgentPath }}
+  <details class="sub-session" hx-get="/subagent/{{ .SubAgentPath }}" hx-trigger="toggle once" hx-target="find .sub-agent-timeline" hx-swap="innerHTML">
+    <summary><span class="agent-link">agent {{ shortID .AgentID }}</span> <a class="open-link" href="/session/{{ .SubAgentPath }}">open ↗</a></summary>
+    <div class="sub-agent-timeline"><div class="dim">Loading…</div></div>
+  </details>
+  {{ else }}<span class="agent-link">agent {{ shortID .AgentID }}</span>{{ end }}
+  {{ if .Summary }}<div class="workflow-summary">{{ markdown .Summary }}</div>{{ end }}
+</div>
+{{ end }}
+
+{{ define "event-child-session" }}
+<details class="sub-session" hx-get="/subagent/{{ .SubAgentPath }}" hx-trigger="toggle once" hx-target="find .sub-agent-timeline" hx-swap="innerHTML">
+  <summary><span class="agent-badge agent-{{ .Agent }}">{{ agentName .Agent }}</span> <span class="child-label">{{ .AgentID }}</span>{{ if .Text }} · {{ .Text }}{{ end }} <a class="open-link" href="/session/{{ .SubAgentPath }}">open ↗</a></summary>
+  <div class="sub-agent-timeline"><div class="dim">Loading…</div></div>
+</details>
+{{ end }}
+
+{{ define "env-panel" }}
+{{ with .Env }}{{ if not .Empty }}
+<details class="env-panel">
+  <summary><span class="env-title">Environment</span> <span class="env-summary">{{ .Summary }}</span></summary>
+  <div class="env-grid">
+    {{ if .Models }}<section><h4>Models</h4><ul>{{ range .Models }}<li>{{ if .Index }}<a href="?event={{ .Index }}">{{ .Model }}</a>{{ else }}{{ .Model }}{{ end }}{{ if .Effort }} <span class="dim">effort {{ .Effort }}</span>{{ end }}{{ if .Turns }} <span class="dim">· {{ .Turns }} turns</span>{{ end }}</li>{{ end }}</ul></section>{{ end }}
+    {{ if .Tokens }}<section class="env-wide"><h4>Tokens{{ if gt .Cost 0.0 }} · {{ fmtUSD .Cost }}{{ end }}</h4><div class="env-table-wrap"><table class="env-table"><tr><th></th><th>in</th><th>out</th><th>cache rd</th><th>cache wr</th><th>cost</th></tr>{{ range .Tokens }}<tr><td>{{ .Model }}</td><td>{{ fmtTokens .Input }}</td><td>{{ fmtTokens .Output }}</td><td>{{ fmtTokens .CacheRead }}</td><td>{{ fmtTokens .CacheCreation }}</td><td>{{ if gt .Cost 0.0 }}{{ fmtUSD .Cost }}{{ end }}</td></tr>{{ end }}{{ if gt (len .Tokens) 1 }}<tr class="env-total"><td>total</td><td>{{ fmtTokens .Total.Input }}</td><td>{{ fmtTokens .Total.Output }}</td><td>{{ fmtTokens .Total.CacheRead }}</td><td>{{ fmtTokens .Total.CacheCreation }}</td><td>{{ if gt .Cost 0.0 }}{{ fmtUSD .Cost }}{{ end }}</td></tr>{{ end }}</table></div></section>{{ end }}
+    {{ if or .Version .Platform .Shell }}<section><h4>Runtime</h4><ul>{{ if .Version }}<li>version {{ .Version }}</li>{{ end }}{{ if .Platform }}<li>{{ .Platform }}{{ if .OS }} · {{ .OS }}{{ end }}</li>{{ end }}{{ if .Shell }}<li>shell {{ .Shell }}</li>{{ end }}{{ if .GitRepo }}<li>git repo{{ if .Worktree }} (worktree){{ end }}</li>{{ end }}</ul></section>{{ end }}
+    {{ if .Tools }}<section><h4>Tools · {{ .ToolUses }} calls</h4><ul class="env-inline">{{ range .Tools }}<li>{{ .Name }} <span class="dim">{{ .Count }}</span></li>{{ end }}</ul></section>{{ end }}
+    {{ if or .Skills .Invoked }}<section><h4>Skills</h4>{{ if .Invoked }}<div class="dim">invoked</div><ul class="env-inline">{{ range .Invoked }}<li>{{ . }}</li>{{ end }}</ul>{{ end }}{{ if .Skills }}<div class="dim">available ({{ len .Skills }})</div><ul class="env-inline env-muted">{{ range .Skills }}<li>{{ . }}</li>{{ end }}</ul>{{ end }}</section>{{ end }}
+    {{ if .MCP }}<section><h4>MCP servers</h4><ul class="env-inline">{{ range .MCP }}<li>{{ . }}</li>{{ end }}</ul></section>{{ end }}
+    {{ if .Hooks }}<section><h4>Hooks</h4><ul class="env-inline">{{ range .Hooks }}<li>{{ .Name }} <span class="dim">{{ .Count }}</span></li>{{ end }}</ul></section>{{ end }}
+    {{ if .Modes }}<section><h4>Modes</h4><ul>{{ range .Modes }}<li>{{ if .Index }}<a href="?event={{ .Index }}">{{ .Kind }} → {{ .Value }}</a>{{ else }}{{ .Kind }} → {{ .Value }}{{ end }}</li>{{ end }}</ul></section>{{ end }}
+  </div>
+</details>
+{{ end }}{{ end }}
+{{ end }}
+
+{{ define "session-list" }}
+{{ $current := .CurrentPath }}
+{{ if .Groups }}
+  {{ range .Groups }}
+  <div class="session-group">
+    <div class="group-header" title="{{ .Key }}"><span class="group-label">{{ .Label }}</span><span class="group-count">{{ len .Items }}</span></div>
+    {{ range .Items }}{{ template "flat-row" (dict "item" . "current" $current) }}{{ end }}
+  </div>
+  {{ end }}
+{{ else }}
+  {{ range .FlatList }}{{ template "flat-row" (dict "item" . "current" $current) }}{{ end }}
+{{ end }}
+{{ end }}
+
+{{ define "group-control" }}
+<form method="post" action="/settings/group" class="group-control" aria-label="Group sessions by">
+  {{ $g := .GroupBy }}
+  <button class="chip{{ if eq $g "none" }} chip-active{{ end }}" name="mode" value="none" type="submit" title="Most recent first, no grouping">list</button>
+  <button class="chip{{ if eq $g "project" }} chip-active{{ end }}" name="mode" value="project" type="submit" title="Group by working directory">project</button>
+  <button class="chip{{ if eq $g "host" }} chip-active{{ end }}" name="mode" value="host" type="submit" title="Group by host">host</button>
+</form>
+{{ end }}
+
+{{ define "agent-chips" }}
+{{ if .AgentCounts }}
+<nav class="agent-chips" aria-label="Filter by agent">
+  <a class="chip{{ if not .AgentFilter }} chip-active{{ end }}" href="/{{ if .SearchQuery }}?q={{ .SearchQuery }}{{ end }}">All</a>
+  {{ $q := .SearchQuery }}{{ $cur := .AgentFilter }}
+  {{ range .AgentCounts }}<a class="chip agent-{{ .Agent }}{{ if eq .Agent $cur }} chip-active{{ end }}" href="/?agent={{ .Agent }}{{ if $q }}&q={{ $q }}{{ end }}">{{ .Name }} <span class="chip-count">{{ .Count }}</span></a>{{ end }}
+</nav>
+{{ end }}
+{{ end }}
+
+{{ define "sidebar-toggle" }}<label class="icon-btn sidebar-toggle" for="nav-toggle" title="Sessions" aria-label="Toggle session list"><span aria-hidden="true">☰</span></label>{{ end }}
+
 {{ define "session-header" }}
 <header class="header">
+  {{ template "sidebar-toggle" }}
   <div class="header-session">
-    <div class="session-title">{{ if .SessionFile.Title }}{{ .SessionFile.Title }}{{ else }}{{ shortID .SessionFile.Name }}{{ end }}</div>
+    <div class="session-title"><span class="agent-badge agent-{{ .SessionFile.Agent }}">{{ agentName .SessionFile.Agent }}</span> {{ if .SessionFile.Title }}{{ .SessionFile.Title }}{{ else }}{{ shortID .SessionFile.Name }}{{ end }}</div>
     <div class="session-sub">
       <span id="session-metadata">{{ .Session.Metadata }}</span>
+      {{ range .Session.Facts.Facts }}<span class="fact">{{ . }}</span>{{ end }}
+      {{ if .SessionFile.Host }}<span class="fact">⌂ {{ .SessionFile.Host }}</span>{{ end }}
+      {{ if .SessionFile.ParentPath }}<a class="fact file-parent" href="/session/{{ .SessionFile.ParentPath }}">↑ parent session</a>{{ end }}
     </div>
   </div>
   <nav class="header-actions">
@@ -69,6 +159,7 @@
     <span aria-hidden="true">⚙</span>
   </summary>
   <div class="settings-panel">
+    <a class="filter-item" href="/sae/settings" hx-boost="false">SAE display and status</a>
     {{ template "toggle-form" (dict "action" "/settings/jump-lines" "label" "Jump to newest on live updates" "on" .JumpLines) }}
     {{ template "toggle-form" (dict "action" "/settings/jump-file" "label" "Jump to newest file when it appears" "on" .JumpFile) }}
   </div>
@@ -94,13 +185,11 @@
     {{ if $hidden }}<span class="filters-count">· {{ len $hidden }} hidden</span>{{ end }}
   </summary>
   <div class="filters-panel">
-    <div class="filters-actions">
-      <form method="post" action="/settings/filter-clear" style="display:inline">
-        <button class="btn" type="submit">Show all</button>
-      </form>
-      <form method="post" action="/settings/filter-reset" style="display:inline">
-        <button class="btn" type="submit">Reset defaults</button>
-      </form>
+    <div class="filters-actions filters-presets">
+      {{ $preset := .Preset }}
+      <form method="post" action="/settings/preset" style="display:inline"><input type="hidden" name="name" value="conversation"><button class="btn{{ if eq $preset "conversation" }} btn-active{{ end }}" type="submit" title="User, assistant and tool calls only">Conversation</button></form>
+      <form method="post" action="/settings/preset" style="display:inline"><input type="hidden" name="name" value="standard"><button class="btn{{ if eq $preset "standard" }} btn-active{{ end }}" type="submit" title="Defaults">Standard</button></form>
+      <form method="post" action="/settings/preset" style="display:inline"><input type="hidden" name="name" value="everything"><button class="btn{{ if eq $preset "everything" }} btn-active{{ end }}" type="submit" title="Every event kind">Everything</button></form>
     </div>
     {{ range $group := (filterGroups $hidden) }}
     <div class="filters-group">{{ $group.Label }}</div>
@@ -122,7 +211,9 @@
 {{ define "timeline" }}
 <div class="timeline-wrap">
   <div class="timeline" id="timeline-root">
-    {{ range .Entries }}{{ template "entry" . }}{{ end }}
+    {{ $visible := .Visible }}
+    {{ if .Skipped }}<div class="timeline-notice">Showing the last {{ .Shown }} of {{ .Total }} events · <a href="{{ .EarlierURL }}">earlier {{ .Skipped }}</a> · <a href="{{ .AllURL }}">show all</a></div>{{ end }}
+    {{ range $visible }}{{ template "entry" . }}{{ end }}
   </div>
   <button class="scroll-chip" type="button" aria-label="Jump to newest">
     <span aria-hidden="true">↓</span> newest
@@ -134,7 +225,7 @@
 {{ if .SessionFile }}<div hx-ext="ws" ws-connect="/ws/live/{{ .SessionFile.Path }}" style="display:none"></div>{{ end }}
 {{ end }}
 
-{{ define "entry" }}<article{{ if .Index }} id="e-{{.Index}}"{{ end }} class="event" data-kind="{{.Kind}}"{{ if eq .Kind "attachment" }} data-subtype="{{.Subtype}}"{{ end }}{{ if .ID }} data-tool-use-id="{{.ID}}"{{ end }}><div class="operation {{.OpClass}}"><span class="icon">{{.Icon}}</span> {{.Label}}{{ if and (eq .Kind "tool") .HasResult }} <span class="status status-{{ if .IsError }}error{{ else }}success{{ end }}">{{ if .IsError }}❌{{ else }}✅{{ end }}</span>{{ end }}</div>{{ if .Index }}<a class="time" href="?event={{.Index}}">{{ formatClock .TS }}</a>{{ else }}<span class="time">{{ formatClock .TS }}</span>{{ end }}<div class="content">{{ renderEntry . }}</div></article>{{ end }}
+{{ define "entry" }}<article{{ if .Index }} id="e-{{.Index}}"{{ end }} class="event" data-kind="{{.Kind}}"{{ if eq .Kind "attachment" }} data-subtype="{{.Subtype}}"{{ end }}{{ if .ID }} data-tool-use-id="{{.ID}}"{{ end }}><div class="operation {{.OpClass}}"><span class="icon">{{.Icon}}</span> {{.Label}}{{ if and (eq .Kind "tool") .HasResult }} <span class="status status-{{ if .IsError }}error{{ else }}success{{ end }}">{{ if .IsError }}❌{{ else }}✅{{ end }}</span>{{ end }}</div>{{ if .Index }}<a class="time" href="?event={{.Index}}">{{ formatClock .TS }}</a>{{ else }}<span class="time">{{ formatClock .TS }}</span>{{ end }}{{ if .Votable }}<span class="vote-box" data-entry="{{.Index}}"><button type="button" class="vote{{ if eq .Vote 1 }} on{{ end }}" data-vote="1" title="good message">👍</button><button type="button" class="vote{{ if eq .Vote -1 }} on{{ end }}" data-vote="-1" title="bad message">👎</button></span>{{ end }}<div class="content">{{ template "sae-tags" .Sae }}{{ renderEntry . }}</div></article>{{ end }}
 
 {{ define "sidebar" }}
 <aside class="sidebar">
@@ -148,15 +239,31 @@
     </div>
   </div>
   <div class="sidebar-search-wrap">
-    <input type="search" class="search-input sidebar-search-input"
-           placeholder="Filter sessions..."
-           autocomplete="off" spellcheck="false">
+    <form method="get" action="/">
+      <input type="search" name="q" class="search-input sidebar-search-input"
+             placeholder="Filter sessions..."
+             value="{{ .SearchQuery }}"
+             autocomplete="off" spellcheck="false">
+      {{ if .AgentFilter }}<input type="hidden" name="agent" value="{{ .AgentFilter }}">{{ end }}
+    </form>
+    {{ template "agent-chips" . }}
+    {{ template "group-control" . }}
   </div>
   <div class="file-list">
-    {{ $current := .CurrentPath }}
-    {{ range .FlatList }}{{ template "flat-row" (dict "item" . "current" $current) }}{{ end }}
+    {{ template "session-list" . }}
   </div>
+  {{ template "pager" .Pager }}
 </aside>
+{{ end }}
+
+{{ define "pager" }}
+{{ if . }}{{ if gt .Pages 1 }}
+<nav class="pager">
+  {{ if .PrevURL }}<a class="pager-link" href="{{ .PrevURL }}">&larr; newer</a>{{ else }}<span class="pager-link pager-disabled">&larr; newer</span>{{ end }}
+  <span class="pager-info">{{ .Page }} / {{ .Pages }} &middot; {{ .Total }} sessions</span>
+  {{ if .NextURL }}<a class="pager-link" href="{{ .NextURL }}">older &rarr;</a>{{ else }}<span class="pager-link pager-disabled">older &rarr;</span>{{ end }}
+</nav>
+{{ end }}{{ end }}
 {{ end }}
 
 {{ define "subagent-entries" }}
@@ -176,20 +283,23 @@
      title="{{ $item.File.Path }}">
     <div class="file-title">{{ if $item.File.Title }}{{ $item.File.Title }}{{ else }}{{ shortID $item.File.Name }}...{{ end }}</div>
     <div class="file-meta">
-      <span class="file-folder">{{ $item.Folder }}</span>
+      <span class="agent-badge agent-{{ $item.File.Agent }}">{{ agentName $item.File.Agent }}</span>
+      {{ if $item.Folder }}<span class="file-folder">{{ $item.Folder }}</span>{{ end }}
+      {{ if $item.File.Host }}<span class="file-host">{{ $item.File.Host }}</span>{{ end }}
       <span>{{ formatStamp $item.File.Modified }}</span>
     </div>
   </a>
   {{ if $item.Agents }}
-  <details class="session-agents" open>
-    <summary class="agents-toggle">{{ len $item.Agents }} agent{{ if gt (len $item.Agents) 1 }}s{{ end }}</summary>
+  <details class="session-agents"{{ if le (len $item.Agents) 3 }} open{{ end }}>
+    <summary class="agents-toggle">{{ len $item.Agents }} sub-agent{{ if gt (len $item.Agents) 1 }}s{{ end }}</summary>
     <div class="agents-list">
       {{ range $item.Agents }}
       <a class="file-item agent{{ if eq .Path $current }} active{{ end }}"
          href="/session/{{ .Path }}"
          title="{{ .Path }}">
-        <div class="file-title">{{ if .Title }}{{ .Title }}{{ else }}{{ shortID .AgentID }}{{ end }}</div>
+        <div class="file-title">{{ if .Title }}{{ .Title }}{{ else }}{{ .AgentID }}{{ end }}</div>
         <div class="file-meta">
+          {{ if .Title }}<span class="file-id">{{ .AgentID }}</span>{{ end }}
           <span>{{ formatStamp .Modified }}</span>
         </div>
       </a>

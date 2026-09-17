@@ -10,8 +10,9 @@ import (
 )
 
 const (
-	ScanBufInit = 64 * 1024
-	MaxScanLine = 4 * 1024 * 1024
+	ScanBufInit      = 64 * 1024
+	MaxScanLine      = 4 * 1024 * 1024
+	MaxPushBlobBytes = 1 << 30
 )
 
 var DefaultAllowlist = []string{
@@ -43,16 +44,17 @@ func IsLogPath(rel string) bool {
 	return strings.HasSuffix(strings.ToLower(rel), ".jsonl")
 }
 
-func Walk(root string, allowlist []string) ([]FileEntry, []string, error) {
+func Walk(root, prefix string, allowlist []string) ([]FileEntry, []string, error) {
 	var out []FileEntry
 	var skipped []string
 	keep := func(rel string, fe *FileEntry, err error) {
 		if err != nil {
 			slog.Warn("walk: skip unresolvable file", "path", rel, "err", err)
-			skipped = append(skipped, filepath.ToSlash(rel))
+			skipped = append(skipped, prefix+filepath.ToSlash(rel))
 			return
 		}
 		if fe != nil {
+			fe.RelPath = prefix + fe.RelPath
 			out = append(out, *fe)
 		}
 	}

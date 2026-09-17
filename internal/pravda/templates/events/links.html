@@ -1,0 +1,9 @@
+{{ define "event-pr-link" }}
+<div class="content-title"><a href="{{ .URL }}" target="_blank" rel="noopener">{{ if .Repo }}{{ .Repo }}{{ end }}{{ if .Number }}#{{ .Number }}{{ end }}{{ if and (not .Repo) (not .Number) }}{{ .URL }}{{ end }}</a></div>
+<div class="content-preview">pull request opened</div>
+{{ end }}
+
+{{ define "event-frame-link" }}
+<div class="content-title"><a href="{{ .URL }}" target="_blank" rel="noopener">{{ if .Text }}{{ .Text }}{{ else }}{{ .URL }}{{ end }}</a></div>
+{{ if .Path }}<div class="content-preview">{{ basename .Path }}</div>{{ end }}
+{{ end }}

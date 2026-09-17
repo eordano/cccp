@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v cccp >/dev/null 2>&1 && exec cccp watch hook-start --agent codex; cat >/dev/null",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v cccp >/dev/null 2>&1 && exec cccp watch hook-end --agent codex; cat >/dev/null",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,5 @@
+{{ define "tool-Skill" }}
+{{ $skill := field . "skill" }}{{ $args := field . "args" }}
+<div class="content-title">/{{ $skill }}{{ if $args }} {{ truncate $args 200 }}{{ end }}</div>
+<div class="content-preview">{{ if .HasResult }}{{ if .IsError }}{{ resultText .ResultContent }}{{ else }}{{ with .ResultField "commandName" }}launched {{ . }}{{ else }}{{ truncate (resultText .ResultContent) 160 }}{{ end }}{{ end }}{{ else }}launching{{ end }}</div>
+{{ end }}

@@ -29,12 +29,42 @@ in
       description = "SQLite database path.";
     };
 
+    saeDir = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Directory of daily SAE dictionary pages served under /sae/daily/.";
+    };
+
+    saeCaptureURL = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Laguna capture service base URL for asynchronous SAE scoring.";
+    };
+
+    saeModelsDir = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Directory of SAE weights and original calibration, keyed by encoder SHA256.";
+    };
+
     tokenFile = lib.mkOption {
       type = lib.types.path;
       description = ''
         Path to a file containing the bearer token. Read by systemd via
         LoadCredential so the token never lands in the world-readable
         /proc or the nix store.
+      '';
+    };
+
+    pushTokenFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = ''
+        Optional file containing a second bearer token accepted ONLY on
+        the push endpoints (POST /ingest, PUT /blob/{sha}, POST
+        /log/append). Hosts holding it can ship their own state but
+        cannot read anything back. Read via LoadCredential like
+        tokenFile.
       '';
     };
 
@@ -63,21 +93,28 @@ in
         User = "cccp";
         Group = "cccp";
         StateDirectory = "cccp";
-        LoadCredential = "token:${toString cfg.tokenFile}";
-        # SyslogIdentifier overrides the default (argv[0], which would be
-        # "bash" because we wrap the server to inject CCCP_TOKEN from the
-        # systemd credential). Without this, journald tags every log line
-        # "bash[pid]" instead of "cccp[pid]".
+        LoadCredential = [
+          "token:${toString cfg.tokenFile}"
+        ]
+        ++ lib.optional (cfg.pushTokenFile != null) "push-token:${toString cfg.pushTokenFile}";
         SyslogIdentifier = "cccp";
         ExecStart = ''
-          ${pkgs.bash}/bin/bash -c 'CCCP_TOKEN="$(cat "$CREDENTIALS_DIRECTORY/token")" exec ${cfg.package}/bin/cccp serve --addr ${cfg.addr} --db ${cfg.dbPath}'
+          ${pkgs.bash}/bin/bash -c 'CCCP_TOKEN="$(cat "$CREDENTIALS_DIRECTORY/token")" ${
+            lib.optionalString (
+              cfg.pushTokenFile != null
+            ) ''CCCP_PUSH_TOKEN="$(cat "$CREDENTIALS_DIRECTORY/push-token")" ''
+          }exec ${cfg.package}/bin/cccp serve --addr ${cfg.addr} --db ${cfg.dbPath}${
+            lib.optionalString (cfg.saeDir != null) " --sae-dir ${cfg.saeDir}"
+          }${lib.optionalString (cfg.saeCaptureURL != null) " --sae-capture-url ${cfg.saeCaptureURL}"}${
+            lib.optionalString (cfg.saeModelsDir != null) " --sae-models-dir ${cfg.saeModelsDir}"
+          }'
         '';
         Restart = "on-failure";
         RestartSec = 2;
 
-        # Hardening
         NoNewPrivileges = true;
         ProtectSystem = "strict";
+        ReadWritePaths = lib.optional (cfg.saeDir != null) cfg.saeDir;
         ProtectHome = true;
         PrivateTmp = true;
         PrivateDevices = true;
@@ -99,8 +136,6 @@ in
     networking.firewall = lib.mkIf cfg.openFirewall {
       allowedTCPPorts =
         let
-          # Match "host:port" where host may contain colons (e.g. "[::1]:12110").
-          # Greedy .* absorbs the host, leaving the trailing numeric port.
           m = builtins.match "(.*):([0-9]+)" cfg.addr;
           port =
             if m == null then

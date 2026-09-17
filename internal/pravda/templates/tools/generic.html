@@ -1,8 +1,9 @@
 {{ define "tool-generic" }}
+{{ $preview := toolPreview . }}
 <details>
   <summary>
-    <div class="content-title">{{ .Name }}</div>
-    <div class="content-preview">Tool operation</div>
+    <div class="content-title">{{ if $preview }}{{ $preview }}{{ else }}{{ .Name }}{{ end }}</div>
+    {{ if not $preview }}<div class="content-preview">Tool operation</div>{{ end }}
   </summary>
   <div class="content-details">
     <div class="dim">Input</div><pre class="selectable">{{ json .Input }}</pre>

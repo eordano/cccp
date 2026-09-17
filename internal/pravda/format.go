@@ -56,6 +56,17 @@ func formatMs(ms int64) string {
 
 func itoa(n int) string { return strconv.Itoa(n) }
 
+func formatCount(n int64) string {
+	switch {
+	case n >= 1000000:
+		return strconv.FormatFloat(float64(n)/1000000.0, 'f', 1, 64) + "M"
+	case n >= 1000:
+		return strconv.FormatFloat(float64(n)/1000.0, 'f', 1, 64) + "k"
+	default:
+		return strconv.FormatInt(n, 10)
+	}
+}
+
 func formatSize(bytes int64) string {
 	switch {
 	case bytes <= 0:

@@ -23,35 +23,46 @@ var tmpl *template.Template
 
 func init() {
 	funcs := template.FuncMap{
-		"markdown":     renderMarkdown,
-		"formatStamp":  formatStamp,
-		"formatClock":  formatClock,
-		"formatMs":     formatMs,
-		"stripAnsi":    stripAnsi,
-		"basename":     basename,
-		"json":         jsonIndent,
-		"lineCount":    lineCount,
-		"firstLine":    firstLine,
-		"truncate":     truncate,
-		"shortID":      shortID,
-		"dict":         dict,
-		"resultText":   resultText,
-		"decodeString": decodeString,
-		"field":        field,
-		"rawField":     rawField,
-		"rawPath":      rawPath,
-		"rawInt":       rawInt,
-		"rawList":      rawList,
-		"eventData":    eventData,
-		"add1":         func(i int) int { return i + 1 },
-		"add":          func(a, b int) int { return a + b },
-		"sub":          func(a, b int) int { return a - b },
-		"renderEntry":  renderEntryContent,
-		"formatSize":   formatSize,
-		"parseNotif":   parseNotifFromString,
-		"filterGroups": filterGroups,
-		"kindClass":    func(s string) string { return strings.ReplaceAll(s, ":", "-") },
+		"markdown":       func(s string) template.HTML { return renderMarkdown(clipText(s, timelineTextCap)) },
+		"markdownFull":   renderMarkdown,
+		"formatStamp":    formatStamp,
+		"formatClock":    formatClock,
+		"formatMs":       formatMs,
+		"stripAnsi":      stripAnsi,
+		"basename":       basename,
+		"json":           func(v interface{}) string { return clipText(jsonIndent(v), timelineJSONCap) },
+		"jsonFull":       jsonIndent,
+		"lineCount":      lineCount,
+		"firstLine":      firstLine,
+		"truncate":       truncate,
+		"shortID":        shortID,
+		"agentName":      agentDisplayName,
+		"parentSession":  parentSessionOf,
+		"toolPreview":    toolPreview,
+		"dict":           dict,
+		"resultText":     func(raw json.RawMessage) string { return clipText(resultText(raw), timelineTextCap) },
+		"resultTextFull": resultText,
+		"decodeString":   decodeString,
+		"field":          field,
+		"rawField":       rawField,
+		"rawPath":        rawPath,
+		"rawInt":         rawInt,
+		"rawList":        rawList,
+		"eventData":      eventData,
+		"add1":           func(i int) int { return i + 1 },
+		"add":            func(a, b int) int { return a + b },
+		"sub":            func(a, b int) int { return a - b },
+		"renderEntry":    renderEntryContent,
+		"formatSize":     formatSize,
+		"formatCount":    formatCount,
+		"parseNotif":     parseNotifFromString,
+		"filterGroups":   filterGroups,
+		"kindClass":      func(s string) string { return strings.ReplaceAll(s, ":", "-") },
 	}
+	for k, v := range extraFuncs() {
+		funcs[k] = v
+	}
+
 	tmpl = template.Must(
 		template.New("root").Funcs(funcs).ParseFS(templateFS,
 			"templates/*.html",
@@ -152,6 +163,8 @@ func resultText(raw json.RawMessage) string {
 		var parts []string
 		for _, it := range items {
 			switch it.Type {
+			case "image":
+				parts = append(parts, "[image]")
 			case "text":
 				parts = append(parts, it.Text)
 			case "tool_reference":
@@ -283,12 +296,11 @@ func renderBase(w io.Writer, page pageData) error {
 }
 
 func renderEntryContent(e *Entry) template.HTML {
-	name := e.TemplateName()
-	if tmpl.Lookup(name) == nil {
-		if e.Kind == KindTool {
-			name = "tool-generic"
-		} else {
-			name = "event-unknown"
+	name := "event-unknown"
+	for _, candidate := range e.TemplateNames() {
+		if tmpl.Lookup(candidate) != nil {
+			name = candidate
+			break
 		}
 	}
 	var buf bytes.Buffer
@@ -302,6 +314,7 @@ type pageData struct {
 	Title       string
 	HiddenKinds []string
 	FlatList    []*flatItem
+	Pager       *pagerData
 	CurrentPath string
 	Session     *Session
 	SessionFile *fileInfo
@@ -309,6 +322,20 @@ type pageData struct {
 	JumpLines   bool
 	JumpFile    bool
 	SearchQuery string
+	AgentFilter string
+	AgentCounts []agentCount
+	Timeline    *timelineData
+	Env         *sessionEnv
+	Sae         *saeSessionData
+	GroupBy     string
+	Groups      []*sidebarGroup
+	Preset      string
+}
+
+type agentCount struct {
+	Agent string
+	Name  string
+	Count int
 }
 
 type flatItem struct {
@@ -318,14 +345,19 @@ type flatItem struct {
 }
 
 type fileInfo struct {
-	ID       string
-	Path     string
-	Name     string
-	Size     int64
-	Modified string
-	Title    string
-	IsAgent  bool
-	AgentID  string
+	ID         string
+	Path       string
+	Name       string
+	Size       int64
+	Modified   string
+	Title      string
+	IsAgent    bool
+	AgentID    string
+	Agent      string
+	Host       string
+	Folder     string
+	ParentPath string
+	Facts      *sessionFacts
 }
 
 type folderNode struct {
@@ -340,6 +372,7 @@ type sessionGroup struct {
 }
 
 type inspectorData struct {
+	Sae     *saeInspectorData
 	Entry   *Entry
 	Raw     *RawEvent
 	Result  *RawEvent
@@ -369,7 +402,10 @@ func filterGroups(hidden []string) []filterGroup {
 		{Label: "Messaging", Kinds: []filterKind{
 			k("user", "User"), k("message", "Assistant"),
 			k("interrupt", "Interrupt"), k("meta", "Meta"),
+			k("agent-result", "Sub-agent result"), k("child-session", "Sub-session"),
+			k("workflow", "Workflow event"), k("unknown", "Unknown type"),
 			k("command", "Slash command"), k("command-output", "Command output"),
+			k("bash-input", "! bash input"), k("bash-output", "! bash output"),
 		}},
 		{Label: "Thinking", Kinds: []filterKind{
 			k("thinking", "Thinking"),
@@ -377,18 +413,45 @@ func filterGroups(hidden []string) []filterGroup {
 		{Label: "System", Kinds: []filterKind{
 			k("turn_duration", "Turn duration"),
 			k("permission-mode", "Permission mode"),
+			k("mode", "Mode"),
 			k("queue-operation", "Queue op"),
 			k("system", "System"),
+			k("pr-link", "PR link"),
+			k("frame-link", "Artifact link"),
 		}},
 		{Label: "Attachments", Kinds: []filterKind{
-			k("attachment:file", "file"),
-			k("attachment:compact_file_reference", "compact_file_reference"),
-			k("attachment:directory", "directory"),
-			k("attachment:plan_mode_exit", "plan_mode_exit"),
-			k("attachment:queued_command", "queued_command"),
-			k("attachment:task_reminder", "task_reminder"),
-			k("attachment:skill_listing", "skill_listing"),
-			k("attachment:deferred_tools_delta", "deferred_tools_delta"),
+			k("attachment:file", "File attached"),
+			k("attachment:compact_file_reference", "Compact file reference"),
+			k("attachment:directory", "Directory listing"),
+			k("attachment:plan_mode", "Plan mode"),
+			k("attachment:plan_mode_exit", "Plan mode exit"),
+			k("attachment:queued_command", "Queued command"),
+			k("attachment:task_reminder", "Task reminder"),
+			k("attachment:skill_listing", "Skill listing"),
+			k("attachment:invoked_skills", "Invoked skills"),
+			k("attachment:deferred_tools_delta", "Deferred tools changed"),
+			k("attachment:mcp_instructions_delta", "MCP instructions changed"),
+			k("attachment:agent_listing_delta", "Agent listing changed"),
+			k("attachment:edited_text_file", "Edited file notice"),
+			k("attachment:total_tokens_reminder", "Token reminder"),
+			k("attachment:hook_success", "Hook ran"),
+			k("attachment:hook_additional_context", "Hook context"),
+			k("attachment:hook_system_message", "Hook message"),
+			k("attachment:date_change", "Date change"),
+			k("attachment:command_permissions", "Command permissions"),
+			k("attachment:auto_mode", "Auto mode"),
+			k("attachment:goal_status", "Goal status"),
+			k("attachment:nested_memory", "Nested memory"),
+			k("attachment:remote_session_change", "Remote session change"),
+			k("attachment:instructions", "Instructions loaded"),
+			k("attachment:prompt_snapshot", "System prompt snapshot"),
+			k("attachment:deferred_tools_record", "Deferred tool schemas"),
+			k("attachment:read_truncation_notice", "Read truncation notice"),
+			k("attachment:auto_mode_exit", "Auto mode exit"),
+			k("attachment:structured_output", "Structured output"),
+			k("attachment:dynamic_skill", "Dynamic skill"),
+			k("attachment:thinking_stripped", "Thinking stripped"),
+			k("attachment:date", "Date"),
 		}},
 	}
 }

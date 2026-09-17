@@ -1,1 +1,1 @@
-{{ define "event-turn_duration" }}<div class="content-preview">{{ formatMs .DurationMs }} · {{ .MessageCount }} messages</div>{{ end }}
+{{ define "event-turn_duration" }}<div class="content-preview">{{ formatMs .DurationMs }} · {{ .MessageCount }} messages{{ if .Text }} · <span class="stderr-line" style="color:var(--error)">{{ .Text }}</span>{{ end }}</div>{{ end }}

@@ -1,0 +1,38 @@
+{{ define "sae-tags" }}{{ if . }}<div class="sae-tags">{{ range . }}<a class="sae-tag" data-sae-feature="{{ .Feature }}" href="/sae/similar/{{ .ID }}?encoder={{ .Encoder }}" title="{{ .Desc }}{{ if .Stance }} · {{ .Stance }}{{ end }}">{{ .Name }} <span class="sae-pct">{{ .Pct }}%</span></a>{{ end }}</div>{{ end }}{{ end }}
+
+{{ define "sae-strip" }}
+<section class="sae-strip sae-workbench" data-sae="{{ .JSON }}" aria-label="SAE conversation map"><div class="sae-fallback">SAE · {{ .Tagged }} tagged messages · <a href="/sae/settings">Settings and status</a> · <a href="/sae/features?encoder={{ .Encoder }}">Features</a></div></section>
+{{ end }}
+
+{{ define "sae-settings-page" }}<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>pravda · SAE settings and status</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/sae.css"><link rel="stylesheet" href="/loading.css"><script src="/loading.js" defer></script><script src="/sae.js" defer></script></head>
+<body class="sae-page"><main class="sae-main sae-settings-main"><nav><a href="/">pravda</a> / <a href="/sae/">SAE dictionaries</a></nav><h1>SAE settings and status</h1><p class="dim">Explore patterns in a conversation and understand the values behind them.</p><section class="sae-workbench" data-sae="{{ .JSON }}" data-sae-settings="true" aria-label="SAE settings"><noscript>Enable JavaScript to configure display preferences. <a href="/sae/">Browse dictionaries and imported records</a>.</noscript></section></main></body></html>{{ end }}
+
+{{ define "sae-features-page" }}<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>pravda · SAE features</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/sae.css"><link rel="stylesheet" href="/loading.css"><script src="/loading.js" defer></script><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body class="sae-page"><main class="sae-main">
+<nav><a href="/">pravda</a> / <a href="/sae/settings?encoder={{ .Encoder }}">SAE settings and status</a></nav>
+<h1>SAE features <span class="dim">encoder {{ printf "%.12s" .Encoder }} · {{ .Total }} records · votes 👍{{ .Up }} 👎{{ .Down }}</span></h1>
+<table class="sae-table"><thead><tr><th>#</th><th>name</th><th>stance</th><th>records</th><th>share</th><th title="Confidence assigned to the feature name, separate from message activation">label confidence</th><th>👍</th><th>👎</th></tr></thead><tbody>
+{{ range .Rows }}<tr><td class="mono">{{ .Feature.Feature }}</td><td title="{{ .Description }}">{{ if .Name }}{{ .Name }}{{ else }}<span class="dim">unnamed</span>{{ end }}</td><td class="dim">{{ .Stance }}</td><td class="mono">{{ .Count }}</td><td class="mono">{{ printf "%.1f" .Share }}%</td><td class="mono">{{ if .Confidence }}{{ .Confidence }}{{ end }}</td><td class="mono">{{ if .Up }}{{ .Up }}{{ end }}</td><td class="mono">{{ if .Down }}{{ .Down }}{{ end }}</td></tr>
+{{ end }}</tbody></table></main></body></html>{{ end }}
+
+{{ define "sae-similar-page" }}<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>pravda · similar moments</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/sae.css"><link rel="stylesheet" href="/loading.css"><script src="/loading.js" defer></script><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body class="sae-page"><main class="sae-main">
+<nav><a href="/">pravda</a> / <a href="/sae/settings?encoder={{ .Encoder }}">SAE settings and status</a></nav>
+<h1>Similar moments <span class="dim">by feature overlap</span></h1>
+<section class="sae-target"><div class="dim">{{ .Target.Kind }} · {{ .Target.Agent }}@{{ .Target.Host }} · <a href="/session/{{ .Target.Path }}?encoder={{ .Encoder }}">{{ .Target.Path }}</a> · line {{ .Target.Line }}</div>
+<blockquote>{{ .Target.Snippet }}</blockquote>{{ template "sae-tags" .Tags }}
+<div class="dim">filter: <a href="?encoder={{ .Encoder }}">all</a> · <a href="?encoder={{ .Encoder }}&amp;kind=user">user</a> · <a href="?encoder={{ .Encoder }}&amp;kind=assistant">assistant</a> · <a href="?encoder={{ .Encoder }}&amp;kind=tool">tool</a></div></section>
+<ol class="sae-matches">{{ range .Matches }}<li><div class="dim"><span class="mono">{{ .Pct }}%</span> · {{ .Kind }} · {{ .Agent }}@{{ .Host }} · <a href="/session/{{ .Path }}?encoder={{ $.Encoder }}">{{ .Path }}</a> · line {{ .Line }} · <a href="/sae/similar/{{ .ID }}?encoder={{ $.Encoder }}">similar</a></div><blockquote>{{ .Snippet }}</blockquote>{{ template "sae-tags" .Tags }}</li>{{ end }}</ol>
+</main></body></html>{{ end }}
+
+{{ define "sae-index-page" }}<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>pravda · SAE dictionaries</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/sae.css"><link rel="stylesheet" href="/loading.css"><script src="/loading.js" defer></script><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body class="sae-page"><main class="sae-main">
+<nav><a href="/">pravda</a> / <a href="/sae/settings">SAE settings and status</a></nav>
+<h1>SAE dictionaries <span class="dim">one per day over the last week of logs, one weekly over everything</span></h1>
+<table class="sae-table"><thead><tr><th>imported</th><th>label</th><th>width</th><th>top-k</th><th>layer</th><th>records</th><th>tagging</th><th>pages</th></tr></thead><tbody>
+{{ range .Encoders }}<tr><td class="mono">{{ .ImportedAt.Format "2006-01-02 15:04" }}</td><td>{{ if .Label }}{{ .Label }}{{ else }}<span class="dim">weekly</span>{{ end }}</td><td class="mono">{{ .Width }}</td><td class="mono">{{ .TopK }}</td><td class="mono">{{ .Layer }}</td><td class="mono">{{ .Records }}</td><td>{{ if .Current }}current{{ end }}</td><td><a href="/sae/features?encoder={{ .Encoder }}">features</a>{{ if .Label }} · <a href="/sae/daily/{{ .Label }}/sessions.html">sessions</a>{{ end }}</td></tr>
+{{ end }}</tbody></table></main></body></html>{{ end }}

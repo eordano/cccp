@@ -21,11 +21,18 @@ const (
 )
 
 type Server struct {
-	Store  *store.Store
-	Token  string
-	Log    *slog.Logger
-	Events *Broadcaster
-	Watch  http.Handler
+	Store *store.Store
+	Token string
+	// PushToken, when non-empty, authorizes ONLY the push endpoints
+	// (POST /ingest, PUT /blob/{sha}, POST /log/append) via bearer auth.
+	// It never grants reads: /current, /log/since, /events and the pravda
+	// UI stay full-token-only, so a host holding it can ship its own state
+	// but cannot read anything back.
+	PushToken string
+	Log       *slog.Logger
+	Events    *Broadcaster
+	Watch     http.Handler
+	SaeDir    string
 }
 
 func (s *Server) Routes() http.Handler {
@@ -39,6 +46,8 @@ func (s *Server) Routes() http.Handler {
 	apiMux.HandleFunc("POST /log/append", s.handleLogAppend)
 	apiMux.HandleFunc("GET /log/since", s.handleLogSince)
 	apiMux.HandleFunc("GET /events", s.handleEvents)
+	apiMux.HandleFunc("POST /sae/import", s.handleSaeImport)
+	apiMux.HandleFunc("GET /sae/feedback", s.handleSaeFeedbackExport)
 
 	outer := http.NewServeMux()
 	outer.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -47,12 +56,15 @@ func (s *Server) Routes() http.Handler {
 	})
 
 	authed := s.auth(apiMux)
-	outer.Handle("POST /ingest", authed)
-	outer.Handle("PUT /blob/{sha}", authed)
+	pushAuthed := s.pushAuth(apiMux)
+	outer.Handle("POST /ingest", pushAuthed)
+	outer.Handle("PUT /blob/{sha}", pushAuthed)
 	outer.Handle("GET /current", authed)
-	outer.Handle("POST /log/append", authed)
+	outer.Handle("POST /log/append", pushAuthed)
 	outer.Handle("GET /log/since", authed)
 	outer.Handle("GET /events", authed)
+	outer.Handle("POST /sae/import", pushAuthed)
+	outer.Handle("GET /sae/feedback", authed)
 	if s.Watch != nil {
 
 		outer.HandleFunc("GET /login", s.handleLoginPage)
@@ -82,6 +94,25 @@ func (s *Server) auth(next http.Handler) http.Handler {
 			}
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) pushAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(got), []byte(s.Token)) == 1 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if s.PushToken != "" && subtle.ConstantTimeCompare([]byte(got), []byte(s.PushToken)) == 1 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if c, err := r.Cookie(cookieToken); err == nil && subtle.ConstantTimeCompare([]byte(c.Value), []byte(s.Token)) == 1 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	})
 }
 
@@ -149,15 +180,17 @@ const loginHTML = `<!DOCTYPE html>
   form { background: #141416; border: 1px solid #2a2a2e; border-radius: 8px; padding: 2rem; max-width: 320px; width: 100%; }
   h1 { font-size: 1.2rem; margin: 0 0 1rem; }
   input[type=password] { width: 100%; padding: 0.5rem; background: #1a1a1e; border: 1px solid #3a3a3e; border-radius: 4px; color: #e0e0e0; font-size: 1rem; box-sizing: border-box; }
+  .username { position: absolute; left: -9999px; width: 1px; height: 1px; opacity: 0; }
   button { margin-top: 1rem; padding: 0.5rem 1rem; background: #2563eb; border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 1rem; width: 100%; }
   button:hover { background: #1d4ed8; }
   .error { color: #ef4444; font-size: 0.85rem; margin-top: 0.5rem; }
 </style>
 </head>
 <body>
-<form method="POST" action="/login">
+<form method="POST" action="/login" autocomplete="on">
   <h1>pravda</h1>
-  <input type="password" name="token" placeholder="token" autofocus>
+  <input type="text" name="username" value="pravda" class="username" autocomplete="username" readonly tabindex="-1" aria-hidden="true">
+  <input type="password" name="token" id="token" placeholder="token" autocomplete="current-password" autofocus>
   <button type="submit">enter</button>
 </form>
 </body>

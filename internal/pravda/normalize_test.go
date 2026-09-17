@@ -52,7 +52,7 @@ func TestNormalizeFixtures(t *testing.T) {
 }
 
 func TestSubAgentFile(t *testing.T) {
-	path := "/Users/example/.claude/projects/-Users-example-projects-claude-watch/0b20586f-374a-4bda-aca5-e4c97d62260d/subagents/agent-a1fbf49600c89e5b5.jsonl"
+	path := "/Users/EXAMPLE/.claude/projects/-Users-EXAMPLE-projects-claude-watch/0b20586f-374a-4bda-aca5-e4c97d62260d/subagents/agent-a1fbf49600c89e5b5.jsonl"
 	f, err := os.Open(path)
 	if err != nil {
 		t.Skipf("agent fixture missing: %v", err)
@@ -70,7 +70,7 @@ func TestSubAgentFile(t *testing.T) {
 }
 
 func TestAgentSpawnDetection(t *testing.T) {
-	path := "/Users/example/.claude/projects/-Users-example-projects-claude-watch/0b20586f-374a-4bda-aca5-e4c97d62260d.jsonl"
+	path := "/Users/EXAMPLE/.claude/projects/-Users-EXAMPLE-projects-claude-watch/0b20586f-374a-4bda-aca5-e4c97d62260d.jsonl"
 	f, err := os.Open(path)
 	if err != nil {
 		t.Skipf("parent session missing: %v", err)

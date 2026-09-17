@@ -3,6 +3,7 @@ package pravda
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"strings"
 	"time"
@@ -31,16 +32,49 @@ func (s *SQLiteStore) ListSessions(ctx context.Context) ([]SessionMeta, error) {
 			continue
 		}
 		out = append(out, SessionMeta{
-			Path:    lp.Path,
-			Size:    lp.TotalSize,
-			ModTime: time.Unix(0, lp.LastTime),
+			Path:      lp.Path,
+			Size:      lp.TotalSize,
+			LineCount: lp.LineCount,
+			ModTime:   time.Unix(0, lp.LastTime),
+			Host:      lp.Host,
 		})
 	}
 	return out, nil
 }
 
+func (s *SQLiteStore) SessionLines(ctx context.Context, path string, after int64) ([][]byte, int64, error) {
+	if after == 0 {
+		return s.store.LogContents(ctx, path)
+	}
+	return s.store.LogLinesAfter(ctx, path, after)
+}
+
+func (s *SQLiteStore) LoadFacts(ctx context.Context) (map[string]cachedFacts, error) {
+	rows, err := s.store.AllPathFacts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]cachedFacts, len(rows))
+	for p, r := range rows {
+		f := &sessionFacts{}
+		if err := json.Unmarshal(r.Facts, f); err != nil {
+			continue
+		}
+		out[p] = cachedFacts{facts: f, lines: r.LineCount}
+	}
+	return out, nil
+}
+
+func (s *SQLiteStore) SaveFacts(ctx context.Context, path string, lineCount int, f *sessionFacts) error {
+	b, err := json.Marshal(f)
+	if err != nil {
+		return err
+	}
+	return s.store.PutPathFacts(ctx, path, lineCount, b)
+}
+
 func (s *SQLiteStore) OpenSession(ctx context.Context, path string) (io.ReadCloser, error) {
-	lines, err := s.store.LogContents(ctx, path)
+	lines, _, err := s.store.LogContents(ctx, path)
 	if err != nil {
 		return nil, err
 	}

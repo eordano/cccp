@@ -11,8 +11,6 @@ pkgs.testers.runNixOSTest {
     server = { config, pkgs, ... }: {
       imports = [ cccpModule ];
 
-      # Token file baked into the node for the test. In a real deployment
-      # use sops-nix / agenix / systemd-creds instead.
       environment.etc."cccp/token" = {
         text = "testtoken";
         mode = "0400";
@@ -145,5 +143,36 @@ pkgs.testers.runNixOSTest {
     id1 = on(hostA, "cccp host-id").strip()
     id2 = on(hostA, "cccp host-id").strip()
     assert id1 == id2 and id1, f"host-id not stable: {id1!r} vs {id2!r}"
+
+    # ----- agent profiles: codex ships under agent/codex/, claude never sees it -----
+    hostA.succeed("mkdir -p /root/.codex/sessions/2026/09/08")
+    hostA.succeed(
+        "printf '%s\n' "
+        "'{\"timestamp\":\"2026-09-08T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\",\"cwd\":\"/w\"}}' "
+        "> /root/.codex/sessions/2026/09/08/rollout-s1.jsonl"
+    )
+    out = on(hostA, "cccp push --agent codex")
+    print("A push (codex):", out)
+    assert "1 new lines" in out, out
+    codex_id = on(hostA, "cccp host-id --agent codex").strip()
+    assert codex_id == id1, f"codex daemon must reuse claude's host id: {codex_id!r} vs {id1!r}"
+
+    since = server.succeed(
+        "curl -sf -H 'Authorization: Bearer testtoken' 'http://localhost:12110/log/since?since=0'"
+    )
+    assert "agent/codex/sessions/2026/09/08/rollout-s1.jsonl" in since, since
+
+    out = on(hostB, "cccp pull --full")
+    print("B pull (claude, after codex push):", out)
+    hostB.fail("test -e /root/.claude/agent")
+    hostB.fail("test -e /root/.claude/sessions")
+
+    out = on(hostB, "cccp pull --full --agent codex")
+    print("B pull (codex):", out)
+    hostB.succeed("test -f /root/.codex/sessions/2026/09/08/rollout-s1.jsonl")
+    hostB.succeed("grep -q session_meta /root/.codex/sessions/2026/09/08/rollout-s1.jsonl")
+    hostB.fail("test -e /root/.codex/CLAUDE.md")
+
+    hostA.fail(f"{env} cccp push --agent nosuchagent")
   '';
 }

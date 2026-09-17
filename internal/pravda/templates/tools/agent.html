@@ -7,8 +7,8 @@
 <details open>
   <summary>
     <div class="content-title">
-      {{ if .AgentRef.Description }}{{ .AgentRef.Description }}{{ else if $desc }}{{ $desc }}{{ else }}Agent spawn{{ end }}
-      {{ if .AgentRef }}{{ if .AgentRef.Status }} <span class="agent-badge agent-{{ .AgentRef.Status }}">{{ .AgentRef.Status }}</span>{{ end }}{{ if .AgentRef.IsAsync }} <span class="agent-badge agent-async">async</span>{{ end }}{{ if .AgentRef.AgentID }} <code class="agent-id">{{ .AgentRef.AgentID }}</code>{{ end }}{{ else }} <span class="agent-badge agent-running">running</span>{{ end }}
+      {{ if and .AgentRef .AgentRef.Description }}{{ .AgentRef.Description }}{{ else if $desc }}{{ $desc }}{{ else }}Agent spawn{{ end }}
+      {{ if .AgentRef }}{{ if .AgentRef.Status }} <span class="agent-badge agent-{{ .AgentRef.Status }}">{{ .AgentRef.Status }}</span>{{ end }}{{ if .AgentRef.IsAsync }} <span class="agent-badge agent-async">async</span>{{ end }}{{ if .AgentRef.AgentID }} <code class="agent-id">{{ .AgentRef.AgentID }}</code>{{ end }}{{ else if .IsError }} <span class="agent-badge agent-failed">failed</span>{{ else if .HasResult }} <span class="agent-badge agent-completed">done</span>{{ else }} <span class="agent-badge agent-running">running</span>{{ end }}
     </div>
     <div class="content-preview">-> {{ $subtype }}{{ if and .AgentRef .AgentRef.TotalDurationMs }} · {{ formatMs .AgentRef.TotalDurationMs }}{{ end }}{{ if and .AgentRef .AgentRef.TotalTokens }} · {{ .AgentRef.TotalTokens }} tokens{{ end }}{{ if and .AgentRef .AgentRef.TotalToolUseCount }} · {{ .AgentRef.TotalToolUseCount }} tool uses{{ end }}{{ if and (not .AgentRef) $prompt }} · {{ truncate $prompt 120 }}{{ end }}</div>
   </summary>

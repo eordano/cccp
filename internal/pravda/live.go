@@ -104,6 +104,7 @@ type parsedCache struct {
 
 type parsedItem struct {
 	lineCount int
+	cursor    int64
 	version   int64
 	events    []*RawEvent
 	session   *Session
@@ -141,6 +142,45 @@ func (c *parsedCache) setSession(path string, sess *Session) {
 	}
 }
 
+func (c *parsedCache) cursor(path string) int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if item := c.items[path]; item != nil {
+		return item.cursor
+	}
+	return 0
+}
+
+func (c *parsedCache) appendLines(path string, version, after, cursor int64, lines [][]byte) []*RawEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	prev := c.items[path]
+	var events []*RawEvent
+	if after > 0 && prev != nil {
+		if prev.cursor != after {
+			return prev.events
+		}
+		events = make([]*RawEvent, len(prev.events), len(prev.events)+len(lines))
+		copy(events, prev.events)
+	}
+	for _, line := range lines {
+		if len(line) == 0 {
+			continue
+		}
+		var ev RawEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			continue
+		}
+		ev.Raw = line
+		events = append(events, &ev)
+	}
+	if cursor < after {
+		cursor = after
+	}
+	c.items[path] = &parsedItem{cursor: cursor, version: version, events: events}
+	return events
+}
+
 func (c *parsedCache) parse(r io.Reader, path string, version int64) ([]*RawEvent, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -152,7 +192,7 @@ func (c *parsedCache) parse(r io.Reader, path string, version int64) ([]*RawEven
 
 	var events []*RawEvent
 	skip := 0
-	if prev != nil {
+	if prev != nil && prev.cursor == 0 {
 
 		events = make([]*RawEvent, len(prev.events), len(prev.events)+16)
 		copy(events, prev.events)
@@ -217,12 +257,7 @@ func (s *WatchServer) broadcastLive(rel string) {
 	if len(subs) == 0 {
 		return
 	}
-	rc, err := s.Store.OpenSession(context.Background(), rel)
-	if err != nil {
-		return
-	}
-	defer rc.Close()
-	events, err := s.parsed.parse(rc, rel, s.pathVersion(rel))
+	events, err := s.events(context.Background(), rel, s.pathVersion(rel))
 	if err != nil {
 		return
 	}
@@ -310,7 +345,7 @@ func buildLiveDiff(prev []entryPrint, sess *Session) []byte {
 
 func renderFullTimeline(sess *Session) ([]byte, error) {
 	var buf bytes.Buffer
-	if err := tmpl.ExecuteTemplate(&buf, "timeline", sess); err != nil {
+	if err := tmpl.ExecuteTemplate(&buf, "timeline", newTimeline(sess, nil)); err != nil {
 		return nil, fmt.Errorf("timeline: %w", err)
 	}
 	raw := buf.Bytes()

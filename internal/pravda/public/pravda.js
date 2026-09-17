@@ -46,6 +46,15 @@
     }
   }
 
+  // Close the mobile sessions drawer when a session is picked. The CSS
+  // checkbox keeps working without JS; this just saves a tap.
+  document.addEventListener('click', (e) => {
+    if (e.target.closest && e.target.closest('.sidebar a')) {
+      const t = document.getElementById('nav-toggle');
+      if (t) t.checked = false;
+    }
+  });
+
   document.addEventListener('click', (e) => {
     const btn = e.target.closest('.copy-btn');
     if (!btn) return;
@@ -59,7 +68,7 @@
   // handlers would be simpler but the CSP forbids inline script.
   document.addEventListener('change', (e) => {
     const el = e.target;
-    if (el.matches && el.matches('input.auto-submit')) el.form?.submit();
+    if (el.matches && el.matches('input.auto-submit')) el.form?.requestSubmit();
   });
 
   // --- scroll chip -------------------------------------------------------
@@ -84,6 +93,9 @@
   // node and needs fresh listeners. Events bubble up to <html>, which
   // survives the swap.
   document.documentElement.addEventListener('htmx:afterSettle', wireScrollChip);
+  document.documentElement.addEventListener('htmx:wsAfterMessage', () => {
+    window.PravdaSAE?.refresh();
+  });
 
   // After a live WS fragment applies:
   // 1. Deduplicate entries that were appended via beforeend when the
@@ -140,7 +152,7 @@
   // fragment on HX-Request (pages.go:handleSession) so the 4.8 MB sidebar
   // stays untouched.
   function loadMain(target) {
-    if (typeof htmx === 'undefined') { location.href = target; return; }
+    if (typeof htmx === 'undefined') { window.PravdaLoading?.navigate('Loading session…'); location.href = target; return; }
     htmx.ajax('GET', target, { target: 'main.main-content', swap: 'innerHTML' });
   }
 
@@ -209,3 +221,23 @@
   }
   connectWS();
 })();
+
+// --- thumbs up/down on messages ------------------------------------------
+document.addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('.vote-box .vote');
+  if (!btn) return;
+  const box = btn.parentElement;
+  const pathEl = document.getElementById('session-path');
+  if (!pathEl) return;
+  const was = btn.classList.contains('on');
+  const vote = was ? 0 : Number(btn.dataset.vote);
+  const body = new URLSearchParams({ entry: box.dataset.entry, vote: String(vote) });
+  if (box.getAttribute('aria-busy') === 'true') return;
+  const finish = window.PravdaLoading?.start('Saving feedback…', box);
+  try {
+    const r = await fetch('/feedback/' + pathEl.dataset.sessionPath, { method: 'POST', body, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    if (!r.ok) throw new Error('Feedback failed');
+    for (const b of box.querySelectorAll('.vote')) b.classList.toggle('on', !was && b === btn);
+    finish?.();
+  } catch (_) { finish?.('Could not save feedback. Please try again.'); }
+});

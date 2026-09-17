@@ -21,16 +21,18 @@ Usage:
                         Fails if cheka finds secrets (--cheka-allow N to
                         tolerate up to N findings; -1 disables the check).
                         --cheka-redact: redact secrets in log files instead
+                        --push-only: never pull; local changes ship, remote ones do not land
                         of blocking (blobs with secrets still fail).
   cccp pull  [flags]    Incremental pull: only writes blob files whose
                         content differs from local; appends log lines newer
                         than the saved cursor (deduped against local).
   cccp pull --full      Bootstrap pull: rewrites every blob file from the
                         snapshot, replays all log lines from cursor=0.
-  cccp watch [flags]    Watch ~/.claude and sync on change. Runs as a
+  cccp watch [flags]    Watch the agent's home and sync on change. Runs as a
                         blocking daemon: pushes on fsnotify, pulls on SSE.
-  cccp watch hook-start   SessionStart hook (reads JSON on stdin).
-  cccp watch hook-end     SessionEnd hook (reads JSON on stdin).
+  cccp watch hook-start   SessionStart hook (reads {"session_id":..} on stdin;
+                          falls back to $CCCP_SESSION_ID / $CLAUDE_SESSION_ID).
+  cccp watch hook-end     SessionEnd hook (same payload).
   cccp watch status       Print daemon status (PID, sessions).
   cccp watch stop         SIGTERM the daemon.
   cccp explore [dir]    Browse local sessions as rich timelines (standalone
@@ -42,7 +44,10 @@ Configuration (4 layers, later wins):
   An explicit empty string in a higher layer still overrides a lower one.
 
 CLI flags (any subcommand):
-  --dir PATH            config root directory (default $HOME/.claude)
+  --agent NAME          agent profile (claude, codex, hermes, opencode, ...);
+                        picks the default --dir and allowlist. Non-claude
+                        agents ship under the wire prefix agent/<name>/.
+  --dir PATH            config root directory (default: the agent's home)
   --url, --server-url U server URL, e.g. https://host:12110
   --token TOKEN         bearer token
   --addr, --address A   listen address (default :12110)
@@ -109,6 +114,10 @@ func main() {
 		if err := runExplore(ctx, os.Args[2:]); err != nil {
 			fail(err)
 		}
+	case "sae":
+		if err := runSae(ctx, os.Args[2:]); err != nil {
+			fail(err)
+		}
 	case "host-id":
 		fs, cli := newFlagSet("host-id")
 		mustParse(fs, os.Args[2:])
@@ -146,7 +155,7 @@ func mustResolve(fs *flag.FlagSet, cli *config.CLI) *config.Resolved {
 }
 
 func mustAgent(cfg *config.Resolved) *agent.Config {
-	ac, err := agent.New(cfg.Dir, cfg.URL, cfg.Token)
+	ac, err := agent.New(cfg.Dir, cfg.URL, cfg.Token, cfg.Agent)
 	if err != nil {
 		fail(err)
 	}

@@ -12,7 +12,22 @@ const (
 	cookieCollapsed = "cw_collapsed"
 	cookieJumpLines = "cw_jump_lines"
 	cookieJumpFile  = "cw_jump_file"
+	cookieGroup     = "cw_group"
 )
+
+func readGroup(r *http.Request) string {
+	if c, err := r.Cookie(cookieGroup); err == nil {
+		switch c.Value {
+		case groupNone, groupProject, groupHost:
+			return c.Value
+		}
+	}
+	return groupProject
+}
+
+func writeCookieString(w http.ResponseWriter, name, v string) {
+	http.SetCookie(w, &http.Cookie{Name: name, Value: v, Path: "/", MaxAge: 365 * 24 * 3600, SameSite: http.SameSiteLaxMode})
+}
 
 var defaultHidden = []string{
 	"thinking",
@@ -24,7 +39,22 @@ var defaultHidden = []string{
 	"attachment:skill_listing",
 	"attachment:queued_command",
 	"attachment:edited_text_file",
+	"attachment:total_tokens_reminder",
+	"attachment:batching_reminder_sent",
+	"attachment:bash_output_audience_note",
+	"attachment:nested_memory",
+	"attachment:invoked_skills",
+	"attachment:mcp_instructions_delta",
+	"attachment:agent_listing_delta",
+	"attachment:command_permissions",
+	"attachment:auto_mode",
+	"attachment:goal_status",
+	"attachment:plan_mode",
 	"queue-operation",
+	"unknown",
+	"attachment:prompt_snapshot",
+	"attachment:deferred_tools_record",
+	"attachment:instructions",
 }
 
 func readStringList(r *http.Request, name string) []string {

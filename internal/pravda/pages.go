@@ -1,19 +1,21 @@
 package pravda
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
+	"log"
 	"net/http"
 	"net/url"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
+
+const sessionsPerPage = 50
 
 func (s *WatchServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	flat, err := s.buildSidebar(r.Context())
@@ -22,17 +24,30 @@ func (s *WatchServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query().Get("q")
+	agent := r.URL.Query().Get("agent")
+	counts := countAgents(flat)
+	if agent != "" {
+		flat = filterByAgent(flat, agent)
+	}
 	if q != "" {
 		flat = filterFlatList(flat, q)
 	}
+	pageNum, _ := strconv.Atoi(r.URL.Query().Get("p"))
+	flat, pager := paginateFlat(flat, pageNum, "/", q, agent)
 	page := pageData{
 		Title:       "pravda",
 		FlatList:    flat,
+		Pager:       pager,
 		HiddenKinds: readHidden(r),
 		JumpLines:   readBool(r, cookieJumpLines, true),
 		JumpFile:    readBool(r, cookieJumpFile, true),
 		SearchQuery: q,
+		AgentFilter: agent,
+		AgentCounts: counts,
+		GroupBy:     readGroup(r),
 	}
+	page.Groups = groupItems(page.FlatList, page.GroupBy)
+	page.Preset = presetOf(page.HiddenKinds)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if isHTMX(r) {
 		_ = tmpl.ExecuteTemplate(w, "sidebar", page)
@@ -41,13 +56,96 @@ func (s *WatchServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	_ = renderBase(w, page)
 }
 
+type pagerData struct {
+	Page    int
+	Pages   int
+	Total   int
+	PrevURL string
+	NextURL string
+}
+
+func countAgents(flat []*flatItem) []agentCount {
+	n := map[string]int{}
+	for _, it := range flat {
+		n[it.File.Agent]++
+	}
+	var out []agentCount
+	for a, c := range n {
+		out = append(out, agentCount{Agent: a, Name: agentDisplayName(a), Count: c})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Agent < out[j].Agent
+	})
+	if len(out) < 2 {
+		return nil
+	}
+	return out
+}
+
+func filterByAgent(items []*flatItem, agent string) []*flatItem {
+	var out []*flatItem
+	for _, it := range items {
+		if it.File.Agent == agent {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+func paginateFlat(flat []*flatItem, page int, base, q, agent string) ([]*flatItem, *pagerData) {
+	total := len(flat)
+	pages := max(1, (total+sessionsPerPage-1)/sessionsPerPage)
+	page = min(max(page, 1), pages)
+	start := (page - 1) * sessionsPerPage
+	end := min(start+sessionsPerPage, total)
+	pd := &pagerData{Page: page, Pages: pages, Total: total}
+	if page > 1 {
+		pd.PrevURL = pageURL(base, q, agent, page-1)
+	}
+	if page < pages {
+		pd.NextURL = pageURL(base, q, agent, page+1)
+	}
+	return flat[start:end], pd
+}
+
+func pageURL(base, q, agent string, page int) string {
+	v := url.Values{}
+	if q != "" {
+		v.Set("q", q)
+	}
+	if agent != "" {
+		v.Set("agent", agent)
+	}
+	v.Set("p", strconv.Itoa(page))
+	return base + "?" + v.Encode()
+}
+
+func pageContaining(flat []*flatItem, rel string) int {
+	for i, it := range flat {
+		if it.File.Path == rel {
+			return i/sessionsPerPage + 1
+		}
+		for _, a := range it.Agents {
+			if a.Path == rel {
+				return i/sessionsPerPage + 1
+			}
+		}
+	}
+	return 1
+}
+
 func filterFlatList(items []*flatItem, q string) []*flatItem {
 	q = strings.ToLower(q)
 	var out []*flatItem
 	for _, item := range items {
 		if strings.Contains(strings.ToLower(item.File.Title), q) ||
 			strings.Contains(strings.ToLower(item.File.Path), q) ||
-			strings.Contains(strings.ToLower(item.Folder), q) {
+			strings.Contains(strings.ToLower(item.Folder), q) ||
+			strings.Contains(strings.ToLower(item.File.Host), q) ||
+			strings.Contains(item.File.Agent, q) {
 			out = append(out, item)
 		}
 	}
@@ -61,22 +159,15 @@ func (s *WatchServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	ver := s.pathVersion(rel)
 	sess, ok := s.parsed.getCachedSession(rel, ver)
 	if !ok {
-		events, cached := s.parsed.getCached(rel, ver)
-		if !cached {
-			rc, err := s.Store.OpenSession(ctx, rel)
-			if err != nil {
-				http.NotFound(w, r)
-				return
-			}
-			defer rc.Close()
-			events, err = s.parsed.parse(rc, rel, ver)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
+		events, err := s.events(ctx, rel, ver)
+		if err != nil {
+			sessionError(w, r, err)
+			return
 		}
 		sess = Normalize(events, nil)
 		setAgentPaths(sess, rel)
+		sess.Facts = factsFromEvents(events)
+		setEntryAgent(sess, agentOfPath(rel))
 		s.parsed.setSession(rel, sess)
 	}
 
@@ -92,34 +183,107 @@ func (s *WatchServer) handleSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.cache.set(rel, fingerprintAll(sess.Entries))
+	eventIndex := 0
+	if event := r.URL.Query().Get("event"); event != "" {
+		var err error
+		eventIndex, err = strconv.Atoi(event)
+		if err != nil || eventIndex < 1 || eventIndex > len(sess.Entries) {
+			http.NotFound(w, r)
+			return
+		}
+	}
+	if eventIndex == 0 {
+		s.cache.set(rel, fingerprintAll(sess.Entries))
+	}
 
 	file := &fileInfo{
-		Name: filepath.Base(rel),
-		Path: rel,
+		Name:  filepath.Base(rel),
+		Path:  rel,
+		Agent: agentOfPath(rel),
+		Facts: sess.Facts,
 	}
 	file.IsAgent = isAgentPath(rel)
 	if file.IsAgent {
-		file.AgentID = strings.TrimSuffix(strings.TrimPrefix(file.Name, "agent-"), ".jsonl")
+		file.AgentID = subagentLabel(rel)
 	}
-	file.Title = extractTitleFromEvents(sess.Events)
+	if sess.Facts != nil {
+		file.Title = sess.Facts.Title
+	}
+	if file.Title == "" && file.IsAgent {
+		file.Title = file.AgentID
+	}
+	file.Folder = folderFor(rel, sess.Facts)
 
 	flat, err := s.buildSidebar(ctx)
+	for _, it := range flat {
+		if it.File.Path == rel {
+			file.Host = it.File.Host
+		}
+		for _, a := range it.Agents {
+			if a.Path == rel {
+				file.Host = a.Host
+				file.ParentPath = it.File.Path
+				file.IsAgent = true
+				file.AgentID = a.AgentID
+			}
+		}
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	hidden := readHidden(r)
 
+	pageNum, _ := strconv.Atoi(r.URL.Query().Get("p"))
+	if pageNum < 1 {
+		pageNum = pageContaining(flat, rel)
+	}
+	flat, pager := paginateFlat(flat, pageNum, "/session/"+rel, "", "")
+
+	copySession := *sess
+	copySession.Entries = append([]Entry(nil), sess.Entries...)
+	sess = &copySession
+	if eventIndex == 0 {
+		s.decorateVotes(ctx, rel, sess)
+	}
+	encoder := s.chosenEncoder(ctx, r)
+	transient := s.enqueueSae(ctx, r, rel, sess, encoder)
+	saeSession := sess
+	if eventIndex > 0 {
+		saeSession = &Session{Entries: []Entry{sess.Entries[eventIndex-1]}, Facts: sess.Facts}
+	}
+	saeData := s.decorateSae(ctx, saeSession, encoder)
+	applySaeTransient(saeData.Payload, transient)
+	setSaeSession(saeData, rel)
+	if limit := r.URL.Query().Get("limit"); limit != "" {
+		u, _ := url.Parse(saeData.Payload.RefreshURL)
+		q := u.Query()
+		q.Set("limit", limit)
+		u.RawQuery = q.Encode()
+		saeData.Payload.RefreshURL = u.String()
+		saeData.JSON = saeData.Payload.json()
+	}
+
 	page := pageData{
 		Title:       "pravda · " + file.Name,
 		FlatList:    flat,
+		Pager:       pager,
 		CurrentPath: rel,
 		Session:     sess,
 		SessionFile: file,
+		Timeline:    timelineFor(r, rel, sess, hidden, childMarkers(flat, rel)),
+
+		Sae:         saeData,
 		HiddenKinds: hidden,
+		GroupBy:     readGroup(r),
+		Preset:      presetOf(hidden),
 		JumpLines:   readBool(r, cookieJumpLines, true),
 		JumpFile:    readBool(r, cookieJumpFile, true),
+	}
+
+	page.Groups = groupItems(page.FlatList, page.GroupBy)
+	if eventIndex == 0 {
+		page.Env = buildEnv(sess)
 	}
 
 	if evStr := r.URL.Query().Get("event"); evStr != "" {
@@ -137,7 +301,8 @@ func (s *WatchServer) handleSession(w http.ResponseWriter, r *http.Request) {
 			Raw:     entry.RawSource,
 			Result:  entry.RawResult,
 			ToolUse: entry.RawToolUse,
-			BackURL: "/session/" + rel,
+			BackURL: "/session/" + rel + "?encoder=" + url.QueryEscape(saeData.Encoder),
+			Sae:     saeInspector(saeData, entry),
 		}
 	}
 
@@ -207,6 +372,33 @@ func (s *WatchServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 		writeStringList(w, cookieHidden, defaultHidden)
 	case "filter-clear":
 		writeStringList(w, cookieHidden, []string{})
+	case "preset":
+		list, ok := presets[r.FormValue("name")]
+		if !ok {
+			http.Error(w, "unknown preset", http.StatusBadRequest)
+			return
+		}
+		writeStringList(w, cookieHidden, list)
+	case "sae-encoder":
+		if !s.validEncoder(r.Context(), r.FormValue("encoder")) {
+			http.Error(w, "unknown SAE dictionary", http.StatusBadRequest)
+			return
+		}
+		writeCookieString(w, cookieSaeEncoder, r.FormValue("encoder"))
+		back, _ := url.Parse(safeBack(r))
+		q := back.Query()
+		q.Set("encoder", r.FormValue("encoder"))
+		back.RawQuery = q.Encode()
+		http.Redirect(w, r, back.String(), http.StatusSeeOther)
+		return
+	case "group":
+		switch v := r.FormValue("mode"); v {
+		case groupNone, groupProject, groupHost:
+			writeCookieString(w, cookieGroup, v)
+		default:
+			http.Error(w, "unknown group mode", http.StatusBadRequest)
+			return
+		}
 	case "collapse":
 		folder := r.FormValue("folder")
 		if folder == "" {
@@ -243,8 +435,7 @@ func (s *WatchServer) buildSidebar(ctx context.Context) ([]*flatItem, error) {
 	}
 	var flat []*flatItem
 	for _, g := range groups {
-		folder := prettyFolder(filepath.ToSlash(filepath.Dir(g.Session.Path)))
-		item := &flatItem{File: g.Session, Folder: folder}
+		item := &flatItem{File: g.Session, Folder: g.Session.Folder}
 		for _, a := range g.Agents {
 			item.Agents = append(item.Agents, a)
 		}
@@ -266,11 +457,13 @@ func (s *WatchServer) collectSessions(ctx context.Context) ([]*sessionGroup, err
 		return nil, err
 	}
 
+	s.loadFacts(ctx)
 	var needTitle []int
 	for i := range metas {
 		if cached, ok := s.titles.Load(metas[i].Path); ok {
-			if title, ok := cached.(string); ok {
-				metas[i].Title = title
+			if f, ok := cached.(*cachedFacts); ok && (f.lines >= headLines || metas[i].LineCount <= f.lines) {
+				metas[i].Facts = f.facts
+				metas[i].Title = f.facts.Title
 				continue
 			}
 		}
@@ -281,29 +474,50 @@ func (s *WatchServer) collectSessions(ctx context.Context) ([]*sessionGroup, err
 	if len(needTitle) > 0 {
 		s.extractMissingTitles(ctx, metas, needTitle)
 	}
+	byID := map[string]string{}
+	for _, m := range metas {
+		if m.Facts != nil && m.Facts.SessionID != "" && !isAgentPath(m.Path) {
+			byID[m.Facts.SessionID] = m.Path
+		}
+	}
 	sessions := make(map[string]*sessionGroup)
+	group := func(p string) *sessionGroup {
+		if sessions[p] == nil {
+			sessions[p] = &sessionGroup{}
+		}
+		return sessions[p]
+	}
 	for _, m := range metas {
 		if filepath.Base(m.Path) == "history.jsonl" {
 			continue
 		}
 		fi := metaToFileInfo(m)
-		if isAgentPath(m.Path) {
-			parentPath := parentSessionOf(m.Path)
-			if sessions[parentPath] == nil {
-				sessions[parentPath] = &sessionGroup{}
+		switch {
+		case isAgentPath(m.Path):
+			fi.ParentPath = parentSessionOf(m.Path)
+			group(fi.ParentPath).Agents = append(group(fi.ParentPath).Agents, fi)
+		case m.Facts != nil && m.Facts.Parent != "" && byID[m.Facts.Parent] != "" && byID[m.Facts.Parent] != m.Path:
+			fi.IsAgent = true
+			fi.ParentPath = byID[m.Facts.Parent]
+			fi.AgentID = m.Facts.Source
+			if m.Facts.Nickname != "" {
+				fi.AgentID = m.Facts.Nickname
+				if m.Facts.Source != "" && m.Facts.Source != "subagent" {
+					fi.AgentID += " · " + m.Facts.Source
+				}
 			}
-			sessions[parentPath].Agents = append(sessions[parentPath].Agents, fi)
-		} else {
-			if sessions[m.Path] == nil {
-				sessions[m.Path] = &sessionGroup{}
+			if fi.AgentID == "" {
+				fi.AgentID = shortID(m.Facts.SessionID)
 			}
-			sessions[m.Path].Session = fi
+			group(fi.ParentPath).Agents = append(group(fi.ParentPath).Agents, fi)
+		default:
+			group(m.Path).Session = fi
 		}
 	}
 	out := make([]*sessionGroup, 0, len(sessions))
 	for path, g := range sessions {
 		if g.Session == nil {
-			g.Session = &fileInfo{Name: filepath.Base(path), Path: path}
+			g.Session = &fileInfo{Name: filepath.Base(path), Path: path, Agent: agentOfPath(path), Folder: prettyFolder(filepath.ToSlash(filepath.Dir(path)))}
 		}
 		sort.Slice(g.Agents, func(i, j int) bool { return g.Agents[i].Modified < g.Agents[j].Modified })
 		out = append(out, g)
@@ -311,27 +525,72 @@ func (s *WatchServer) collectSessions(ctx context.Context) ([]*sessionGroup, err
 	return out, nil
 }
 
+var fileIDReplacer = strings.NewReplacer("/", "-", ".", "-")
+
 func metaToFileInfo(m SessionMeta) *fileInfo {
 	name := filepath.Base(m.Path)
 	fi := &fileInfo{
-		ID:       strings.NewReplacer("/", "-", ".", "-").Replace(m.Path),
+		ID:       fileIDReplacer.Replace(m.Path),
 		Name:     name,
 		Path:     m.Path,
 		Size:     m.Size,
 		Modified: m.ModTime.Format(time.RFC3339),
 		Title:    m.Title,
 		IsAgent:  isAgentPath(m.Path),
+		Agent:    agentOfPath(m.Path),
+		Host:     m.Host,
+		Facts:    m.Facts,
 	}
 	if fi.IsAgent {
-		fi.AgentID = strings.TrimSuffix(strings.TrimPrefix(name, "agent-"), ".jsonl")
+		fi.AgentID = subagentLabel(m.Path)
 	}
+	fi.Folder = folderFor(m.Path, m.Facts)
 	return fi
+}
+
+func folderFor(rel string, f *sessionFacts) string {
+	if f != nil && f.CWD != "" {
+		return prettyCWD(f.CWD)
+	}
+	dir := filepath.ToSlash(filepath.Dir(rel))
+	if agentOf(rel) != "" {
+		return ""
+	}
+	if slug := filepath.Base(dir); strings.HasPrefix(slug, "-") {
+		return prettyCWD(strings.ReplaceAll(slug, "-", "/"))
+	}
+	return prettyFolder(dir)
+}
+
+func timelineFor(r *http.Request, rel string, sess *Session, hidden []string, markers []Entry) *timelineData {
+	td := newTimeline(sess, hidden)
+	td.Path = rel
+	td.Entries = mergeMarkers(sess.Entries, markers)
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			td.Limit = n
+		}
+	}
+	return td
+}
+
+func setEntryAgent(sess *Session, agent string) {
+	for i := range sess.Entries {
+		sess.Entries[i].Agent = agent
+		for j := range sess.Entries[i].SubAgent {
+			sess.Entries[i].SubAgent[j].Agent = agent
+		}
+	}
 }
 
 func setAgentPaths(sess *Session, parentRel string) {
 	base := strings.TrimSuffix(parentRel, filepath.Ext(parentRel))
 	for i := range sess.Entries {
 		e := &sess.Entries[i]
+		if e.Kind == KindWorkflow {
+			e.SubAgentPath = filepath.ToSlash(filepath.Join(filepath.Dir(parentRel), "agent-"+e.AgentID+".jsonl"))
+			continue
+		}
 		if e.Kind != KindTool || (e.Name != "Agent" && e.Name != "Task") {
 			continue
 		}
@@ -347,36 +606,23 @@ func (s *WatchServer) handleSubAgent(w http.ResponseWriter, r *http.Request) {
 	rel := r.PathValue("path")
 	ctx := r.Context()
 	ver := s.pathVersion(rel)
-	events, cached := s.parsed.getCached(rel, ver)
-	if !cached {
-		rc, err := s.Store.OpenSession(ctx, rel)
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		defer rc.Close()
-		events, err = s.parsed.parse(rc, rel, ver)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+	events, err := s.events(ctx, rel, ver)
+	if err != nil {
+		sessionError(w, r, err)
+		return
 	}
 	sess := Normalize(events, nil)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = tmpl.ExecuteTemplate(w, "subagent-entries", sess)
 }
 
-var agentPathRe = regexp.MustCompile(`^(.+?)/([^/]+?)/subagents/agent-(.+)\.jsonl$`)
-
-func isAgentPath(rel string) bool { return agentPathRe.MatchString(rel) }
-
-func parentSessionOf(rel string) string {
-	rel = filepath.ToSlash(rel)
-	m := agentPathRe.FindStringSubmatch(rel)
-	if m == nil {
-		return ""
+func sessionError(w http.ResponseWriter, r *http.Request, err error) {
+	var nf *pathNotFoundError
+	if errors.As(err, &nf) || errors.Is(err, fs.ErrNotExist) {
+		http.NotFound(w, r)
+		return
 	}
-	return m[1] + "/" + m[2] + ".jsonl"
+	http.Error(w, err.Error(), http.StatusInternalServerError)
 }
 
 type sessionHeadOpener interface {
@@ -386,7 +632,7 @@ type sessionHeadOpener interface {
 func (s *WatchServer) extractMissingTitles(ctx context.Context, metas []SessionMeta, indices []int) {
 	type result struct {
 		idx   int
-		title string
+		facts *sessionFacts
 	}
 	ch := make(chan result, len(indices))
 	sem := make(chan struct{}, 16)
@@ -394,41 +640,84 @@ func (s *WatchServer) extractMissingTitles(ctx context.Context, metas []SessionM
 		sem <- struct{}{}
 		go func(i int) {
 			defer func() { <-sem }()
-			t := s.extractSessionTitle(ctx, metas[i].Path)
-			ch <- result{i, t}
+			ch <- result{i, s.extractSessionFacts(ctx, metas[i].Path)}
 		}(idx)
 	}
 	for range indices {
 		r := <-ch
-		metas[r.idx].Title = r.title
-		if r.title != "" {
-			s.titles.Store(metas[r.idx].Path, r.title)
+		if r.facts == nil {
+			continue
+		}
+		metas[r.idx].Facts = r.facts
+		metas[r.idx].Title = r.facts.Title
+		if r.facts.Title != "" || r.facts.CWD != "" {
+			s.titles.Store(metas[r.idx].Path, &cachedFacts{facts: r.facts, lines: metas[r.idx].LineCount})
+			if fs, ok := innerStore(s.Store).(factsStore); ok {
+				if err := fs.SaveFacts(ctx, metas[r.idx].Path, metas[r.idx].LineCount, r.facts); err != nil {
+					log.Printf("save facts %s: %v", metas[r.idx].Path, err)
+				}
+			}
 		}
 	}
 }
 
-func (s *WatchServer) extractSessionTitle(ctx context.Context, path string) string {
+func (s *WatchServer) loadFacts(ctx context.Context) {
+	s.factsOnce.Do(func() {
+		fs, ok := innerStore(s.Store).(factsStore)
+		if !ok {
+			return
+		}
+		rows, err := fs.LoadFacts(ctx)
+		if err != nil {
+			log.Printf("load facts: %v", err)
+			return
+		}
+		for p, cf := range rows {
+			if _, loaded := s.titles.Load(p); !loaded {
+				s.titles.Store(p, &cachedFacts{facts: cf.facts, lines: cf.lines})
+			}
+		}
+	})
+}
 
+func (s *WatchServer) extractSessionFacts(ctx context.Context, path string) *sessionFacts {
 	if ho, ok := s.Store.(sessionHeadOpener); ok {
-		rc, err := ho.OpenSessionHead(ctx, path, 20)
+		rc, err := ho.OpenSessionHead(ctx, path, headLines)
 		if err == nil {
 			defer rc.Close()
-			return extractTitleFromReader(rc)
+			return factsFromReader(rc)
 		}
 	}
 	rc, err := s.Store.OpenSession(ctx, path)
 	if err != nil {
-		return ""
+		return nil
 	}
 	defer rc.Close()
-	return extractTitleFromReader(rc)
+	return factsFromReader(rc)
 }
 
 func extractTitleFromEvents(events []*RawEvent) string {
+	var custom, ai, prompt string
 	for _, e := range events {
-		if t := userPromptTitle(e); t != "" {
-			return t
+		if t := titledEventTitle(e); t != "" {
+			if e.Type == "custom-title" {
+				custom = t
+			} else {
+				ai = t
+			}
 		}
+		if prompt == "" {
+			prompt = userPromptTitle(e)
+		}
+	}
+	if custom != "" {
+		return custom
+	}
+	if ai != "" {
+		return ai
+	}
+	if prompt != "" {
+		return prompt
 	}
 	var model string
 	for _, e := range events {
@@ -442,44 +731,38 @@ func extractTitleFromEvents(events []*RawEvent) string {
 	return model
 }
 
-func extractTitleFromReader(r io.Reader) string {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 1*1024*1024)
-	var assistantFallback string
-	var modelFallback string
-	lines := 0
-	for sc.Scan() && lines < 500 {
-		lines++
-		raw := sc.Bytes()
-		if len(raw) == 0 {
-			continue
-		}
-		var e RawEvent
-		if err := json.Unmarshal(raw, &e); err != nil {
-			continue
-		}
-		if t := userPromptTitle(&e); t != "" {
-			return t
-		}
-		if assistantFallback == "" {
-			assistantFallback = assistantFirstLineTitle(&e)
-			if modelFallback == "" && e.Type == "assistant" && e.Message != nil && e.Message.Model != "" {
-				modelFallback = e.Message.Model
-			}
-		}
+func titledEventTitle(e *RawEvent) string {
+	if e == nil {
+		return ""
 	}
-	if assistantFallback != "" {
-		return assistantFallback
+	switch e.Type {
+	case "custom-title":
+		return firstLineEllipsis(e.CustomTitle, 90)
+	case "ai-title":
+		return firstLineEllipsis(e.AITitle, 90)
+	case "summary":
+		return firstLineEllipsis(e.Summary, 90)
 	}
-	return modelFallback
+	return ""
 }
 
 func userPromptTitle(e *RawEvent) string {
 	if e == nil || e.Type != "user" || e.IsMeta || e.Message == nil {
 		return ""
 	}
-	s := decodeString(e.Message.Content)
-	if s == "" || strings.HasPrefix(s, "<") {
+	var s string
+	if items := decodeContent(e.Message.Content); items != nil {
+		for _, item := range items {
+			if item.Type == "text" && strings.TrimSpace(item.Text) != "" {
+				s = item.Text
+				break
+			}
+		}
+	} else {
+		s = decodeString(e.Message.Content)
+	}
+	s = strings.TrimSpace(s)
+	if s == "" || strings.HasPrefix(s, "<") || strings.HasPrefix(s, "[{") || strings.HasPrefix(s, "{\"") || strings.HasPrefix(s, "# AGENTS.md") {
 		return ""
 	}
 	return firstLineEllipsis(s, 90)

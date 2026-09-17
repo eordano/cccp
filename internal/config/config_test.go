@@ -412,3 +412,67 @@ func TestUnknownFieldRejected(t *testing.T) {
 		t.Fatal("expected error for unknown config field")
 	}
 }
+
+func TestPushOnlyLayering(t *testing.T) {
+	isolateEnv(t)
+
+	r := parseAndResolve(t, nil)
+	if r.PushOnly {
+		t.Errorf("default PushOnly = true, want false")
+	}
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "cccp", "config.json")
+	os.MkdirAll(filepath.Dir(cfgPath), 0o755)
+	os.WriteFile(cfgPath, []byte(`{"push_only":true}`), 0o600)
+	r = parseAndResolve(t, []string{"--dir", dir})
+	if !r.PushOnly {
+		t.Errorf("file push_only=true did not set PushOnly")
+	}
+
+	t.Setenv("CCCP_DIR", dir)
+	t.Setenv("CCCP_PUSH_ONLY", "false")
+	r = parseAndResolve(t, nil)
+	if r.PushOnly {
+		t.Errorf("env=false did not override file=true")
+	}
+
+	r = parseAndResolve(t, []string{"--push-only"})
+	if !r.PushOnly {
+		t.Errorf("cli --push-only did not override env=false")
+	}
+}
+
+func TestAgentResolution(t *testing.T) {
+	isolateEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	cli := RegisterFlags(fs)
+	r, err := Resolve(fs, cli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Agent != "claude" || r.Dir != filepath.Join(home, ".claude") {
+		t.Fatalf("default: %q %q", r.Agent, r.Dir)
+	}
+	t.Setenv("CCCP_AGENT", "bogus")
+	fs = flag.NewFlagSet("t", flag.ContinueOnError)
+	cli = RegisterFlags(fs)
+	if _, err := Resolve(fs, cli); err == nil {
+		t.Fatal("unknown agent must fail")
+	}
+	os.Unsetenv("CCCP_AGENT")
+	fs = flag.NewFlagSet("t", flag.ContinueOnError)
+	cli = RegisterFlags(fs)
+	if err := fs.Parse([]string{"--agent", "claude", "--dir", "/tmp/elsewhere"}); err != nil {
+		t.Fatal(err)
+	}
+	r, err = Resolve(fs, cli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Agent != "claude" || r.Dir != "/tmp/elsewhere" {
+		t.Fatalf("explicit dir: %q %q", r.Agent, r.Dir)
+	}
+}

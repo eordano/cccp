@@ -45,6 +45,9 @@ func readHookPayload() hookPayload {
 		_ = json.Unmarshal(b, &p)
 	}
 	if p.SessionID == "" {
+		p.SessionID = os.Getenv("CCCP_SESSION_ID")
+	}
+	if p.SessionID == "" {
 		p.SessionID = os.Getenv("CLAUDE_SESSION_ID")
 	}
 	if p.SessionID == "" {
@@ -90,6 +93,10 @@ func watchHookEnd(args []string) error {
 	}
 	if n == 0 && paths.DaemonRunning() {
 		paths.SignalDaemon(syscall.SIGTERM)
+		deadline := time.Now().Add(5 * time.Second)
+		for paths.DaemonRunning() && time.Now().Before(deadline) {
+			time.Sleep(100 * time.Millisecond)
+		}
 	}
 	return nil
 }
@@ -160,7 +167,7 @@ func watchDaemon(args []string) error {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	ac, err := agent.New(cfg.Dir, cfg.URL, cfg.Token)
+	ac, err := agent.New(cfg.Dir, cfg.URL, cfg.Token, cfg.Agent)
 	if err != nil {
 		return err
 	}
@@ -170,7 +177,7 @@ func watchDaemon(args []string) error {
 
 	allow := cfg.Allowlist
 	if allow == nil {
-		allow = agent.DefaultAllowlist
+		allow = ac.DefaultAllowlist()
 	}
 
 	redact := cfg.ChekaRedact
@@ -186,6 +193,7 @@ func watchDaemon(args []string) error {
 		Log:         logger,
 		ChekaAllow:  cfg.ChekaAllow,
 		ChekaRedact: redact,
+		PushOnly:    cfg.PushOnly,
 	})
 }
 
@@ -204,12 +212,15 @@ func spawnWatchDaemon(cfg *config.Resolved, paths secretary.Paths) error {
 	}
 	defer logF.Close()
 
-	runArgs := []string{"watch", "--dir", cfg.Dir}
+	runArgs := []string{"watch", "--agent", cfg.Agent, "--dir", cfg.Dir}
 	if cfg.URL != "" {
 		runArgs = append(runArgs, "--url", cfg.URL)
 	}
 	if cfg.Token != "" {
 		runArgs = append(runArgs, "--token", cfg.Token)
+	}
+	if cfg.PushOnly {
+		runArgs = append(runArgs, "--push-only")
 	}
 
 	c := exec.Command(self, runArgs...)

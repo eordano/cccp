@@ -1,5 +1,6 @@
 {{ define "inspector" }}
 <header class="header">
+  {{ template "sidebar-toggle" }}
   <div class="header-session">
     <div class="session-title">Event inspector · {{ .Entry.Kind }}{{ if .Entry.Name }} / {{ .Entry.Name }}{{ end }}</div>
     <div class="session-sub">
@@ -10,26 +11,36 @@
 <div class="timeline-wrap">
   <div class="timeline">
     <section class="info-modal-body">
+      {{ with .Sae }}
+      <section aria-label="Event SAE activations">
+        <h3>SAE activations{{ if .Dictionary }} · {{ .Dictionary }}{{ end }}</h3>
+        <div class="sae-workbench"{{ if .JSON }} data-sae="{{ .JSON }}" data-sae-event="{{ .Index }}"{{ end }}>
+          <p>{{ .Detail }}</p>
+          {{ if .Tags }}<table class="sae-table"><thead><tr><th>Feature</th><th>Scaled activation</th></tr></thead><tbody>{{ range .Tags }}<tr><td title="{{ .Desc }}"><a href="/sae/similar/{{ .ID }}?encoder={{ .Encoder }}">{{ .Name }}</a></td><td>{{ .Pct }}%</td></tr>{{ end }}</tbody></table>{{ end }}
+          <a href="{{ .SettingsURL }}">SAE settings and status</a>
+        </div>
+      </section>
+      {{ end }}
       <section>
         <h3>Normalized entry</h3>
-        <pre class="json-pre selectable">{{ json .Entry }}</pre>
+        <pre class="json-pre selectable">{{ jsonFull .Entry }}</pre>
       </section>
       {{ if .ToolUse }}
       <section>
         <h3>tool_use</h3>
-        <pre class="json-pre selectable">{{ json .ToolUse }}</pre>
+        <pre class="json-pre selectable">{{ jsonFull .ToolUse }}</pre>
       </section>
       {{ end }}
       {{ if .Raw }}
       <section>
         <h3>{{ if .ToolUse }}Assistant event{{ else }}Raw source{{ end }}</h3>
-        <pre class="json-pre selectable">{{ json .Raw.Raw }}</pre>
+        <pre class="json-pre selectable">{{ jsonFull .Raw.Raw }}</pre>
       </section>
       {{ end }}
       {{ if .Result }}
       <section>
         <h3>Tool result event</h3>
-        <pre class="json-pre selectable">{{ json .Result.Raw }}</pre>
+        <pre class="json-pre selectable">{{ jsonFull .Result.Raw }}</pre>
       </section>
       {{ end }}
     </section>

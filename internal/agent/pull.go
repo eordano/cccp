@@ -56,7 +56,7 @@ func Pull(ctx context.Context, c *Config, full bool) (*PullResult, error) {
 				continue
 			}
 			abs := filepath.Join(c.Root, p)
-			if !safeToRemove(abs, state.PulledSHAs[p], state.BlobCache[p].SHA) {
+			if !safeToRemove(abs, state.PulledSHAs[p], state.BlobCache[c.Prefix+p].SHA) {
 				slog.Warn("pull: keeping locally modified file despite server tombstone", "path", p)
 				continue
 			}
@@ -81,7 +81,7 @@ func Pull(ctx context.Context, c *Config, full bool) (*PullResult, error) {
 			state.LogOffsets = map[string]int64{}
 		}
 		for p, off := range fullOffsets {
-			state.LogOffsets[p] = off
+			state.LogOffsets[c.Prefix+p] = off
 		}
 	}
 	if newCursor > state.LogCursor {
@@ -124,15 +124,19 @@ func pullCurrent(ctx context.Context, c *Config, res *PullResult) (map[string]st
 		if hdr.Typeflag != tar.TypeReg {
 			continue
 		}
+		rel, ok := c.localRel(hdr.Name)
+		if !ok {
+			continue
+		}
 		res.TarFiles++
-		seen[hdr.Name] = struct{}{}
+		seen[rel] = struct{}{}
 		buf, err := io.ReadAll(tr)
 		if err != nil {
 			return nil, nil, err
 		}
 		sum := sha256.Sum256(buf)
-		shas[hdr.Name] = hex.EncodeToString(sum[:])
-		changed, err := writeIfDifferent(c.Root, hdr.Name, hdr.Mode, hdr.ModTime, buf)
+		shas[rel] = hex.EncodeToString(sum[:])
+		changed, err := writeIfDifferent(c.Root, rel, hdr.Mode, hdr.ModTime, buf)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -244,10 +248,14 @@ func pullLogs(ctx context.Context, c *Config, res *PullResult, since int64, full
 		if err := json.Unmarshal(raw, &l); err != nil {
 			return 0, nil, err
 		}
-		byPath[l.Path] = append(byPath[l.Path], l)
 		if l.FirstSeen > maxFirstSeen {
 			maxFirstSeen = l.FirstSeen
 		}
+		rel, ok := c.localRel(l.Path)
+		if !ok {
+			continue
+		}
+		byPath[rel] = append(byPath[rel], l)
 	}
 	if err := scanner.Err(); err != nil {
 		return 0, nil, err

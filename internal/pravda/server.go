@@ -4,7 +4,9 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/eordano/cccp/internal/sae"
 	"io/fs"
 	"log"
 	"mime"
@@ -22,9 +24,12 @@ import (
 var publicFS embed.FS
 
 type WatchServer struct {
-	Store    SessionStore
-	assets   fs.FS
-	upgrader websocket.Upgrader
+	Store     SessionStore
+	Sae       *sae.Index
+	SaeScorer saeExecutor
+	SaeDir    string
+	assets    fs.FS
+	upgrader  websocket.Upgrader
 
 	clientsMu sync.Mutex
 	clients   map[*websocket.Conn]struct{}
@@ -35,7 +40,8 @@ type WatchServer struct {
 
 	sidebar sidebarState
 
-	titles sync.Map
+	titles    sync.Map
+	factsOnce sync.Once
 
 	versions sync.Map
 }
@@ -49,7 +55,7 @@ type sidebarState struct {
 func NewWatchServer(store SessionStore) *WatchServer {
 	assets, _ := fs.Sub(publicFS, "public")
 	return &WatchServer{
-		Store:    store,
+		Store:    withConverters(store),
 		assets:   assets,
 		upgrader: websocket.Upgrader{CheckOrigin: checkOrigin},
 		clients:  map[*websocket.Conn]struct{}{},
@@ -76,6 +82,14 @@ func (s *WatchServer) Routes() http.Handler {
 
 	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("GET /session/{path...}", s.handleSession)
+	mux.HandleFunc("GET /sae", s.handleSaeIndex)
+	mux.HandleFunc("GET /sae/{$}", s.handleSaeIndex)
+	mux.HandleFunc("GET /sae/features", s.handleSaeFeatures)
+	mux.HandleFunc("GET /sae/settings", s.handleSaeSettings)
+	mux.HandleFunc("GET /sae/session/{path...}", s.handleSaeSession)
+	mux.HandleFunc("GET /sae/daily/{file...}", s.handleSaeDaily)
+	mux.HandleFunc("GET /sae/similar/{id}", s.handleSaeSimilar)
+	mux.HandleFunc("POST /feedback/{path...}", s.handleFeedback)
 	mux.HandleFunc("GET /subagent/{path...}", s.handleSubAgent)
 	mux.HandleFunc("POST /settings/{key}", s.handleSettings)
 
@@ -191,6 +205,31 @@ func (s *WatchServer) onLogEvent(rel string) {
 	if !isAgentPath(rel) {
 		s.broadcast("new-session:" + rel)
 	}
+}
+
+func (s *WatchServer) events(ctx context.Context, rel string, ver int64) ([]*RawEvent, error) {
+	if events, ok := s.parsed.getCached(rel, ver); ok {
+		return events, nil
+	}
+	if ls, ok := s.Store.(sessionLineStore); ok {
+		after := s.parsed.cursor(rel)
+		lines, cursor, err := ls.SessionLines(ctx, rel, after)
+		if err == nil {
+			if after == 0 && len(lines) == 0 {
+				return nil, &pathNotFoundError{rel}
+			}
+			return s.parsed.appendLines(rel, ver, after, cursor, lines), nil
+		}
+		if !errors.Is(err, errNoLineStore) {
+			return nil, err
+		}
+	}
+	rc, err := s.Store.OpenSession(ctx, rel)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return s.parsed.parse(rc, rel, ver)
 }
 
 func (s *WatchServer) pathVersion(rel string) int64 {

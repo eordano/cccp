@@ -1,0 +1,15 @@
+{{ define "tool-Workflow" }}
+{{ $name := .ResultField "workflowName" }}{{ $status := .ResultField "status" }}{{ $summary := .ResultField "summary" }}{{ $run := .ResultField "runId" }}{{ $script := field . "script" }}
+<details>
+  <summary>
+    <div class="content-title">{{ if $name }}{{ $name }}{{ else }}Workflow{{ end }}{{ if $status }} <span class="agent-badge agent-{{ $status }}">{{ $status }}</span>{{ end }}</div>
+    <div class="content-preview">{{ if $run }}{{ $run }}{{ end }}{{ if $summary }}{{ if $run }} · {{ end }}{{ truncate $summary 160 }}{{ end }}{{ if and (not $run) (not $summary) }}{{ if .HasResult }}{{ truncate (firstLine (resultText .ResultContent)) 160 }}{{ else }}launching{{ end }}{{ end }}</div>
+  </summary>
+  <div class="content-details">
+    {{ with .ResultField "taskId" }}<div class="dim">task <code>{{ . }}</code></div>{{ end }}
+    {{ with .ResultField "transcriptDir" }}<div class="dim">transcripts <code>{{ . }}</code></div>{{ end }}
+    {{ if $script }}<details class="agent-section"><summary class="agent-section-toggle">Script · {{ lineCount $script }} lines</summary><pre class="selectable" style="max-height:30em">{{ truncate $script 40000 }}</pre></details>{{ end }}
+    {{ with resultText .ResultContent }}<div class="dim">Result</div><pre class="selectable">{{ . }}</pre>{{ end }}
+  </div>
+</details>
+{{ end }}

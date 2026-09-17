@@ -6,9 +6,15 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/eordano/cccp/internal/cheka"
+	"sync/atomic"
 	"testing"
 
 	"github.com/eordano/cccp/internal/api"
@@ -64,12 +70,144 @@ func writeFile(t *testing.T, root, rel, body string) {
 
 func newPushClient(t *testing.T, url, token, root string) *Config {
 	t.Helper()
-	c, err := New(root, url, token)
+	c, err := New(root, url, token, "claude")
 	if err != nil {
 		t.Fatal(err)
 	}
 	c.HTTP = &http.Client{}
 	return c
+}
+
+func TestPush_OversizedBlobSkipped(t *testing.T) {
+	discardLogs(t)
+	url := newBackend(t, "tok")
+	root := newClientRoot(t)
+	writeFile(t, root, "CLAUDE.md", "small and clean\n")
+	big := filepath.Join(root, "memory", "huge.bin")
+	if err := os.MkdirAll(filepath.Dir(big), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(MaxPushBlobBytes + 1); err != nil {
+		f.Close()
+		t.Skipf("cannot create sparse file: %v", err)
+	}
+	f.Close()
+	c := newPushClient(t, url, "tok", root)
+
+	res, err := Push(context.Background(), c, DefaultAllowlist, 0, false)
+	if err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if res.BlobsUploaded != 1 {
+		t.Errorf("BlobsUploaded = %d, want 1 (oversized blob skipped, small one shipped)", res.BlobsUploaded)
+	}
+	st, err := LoadState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, p := range st.KnownPushedBlobPaths {
+		if p == "memory/huge.bin" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("oversized blob missing from KnownPushedBlobPaths; a later push would tombstone it")
+	}
+}
+
+func setChunkBytes(t *testing.T, n int) {
+	t.Helper()
+	prev := LogAppendChunkBytes
+	LogAppendChunkBytes = n
+	t.Cleanup(func() { LogAppendChunkBytes = prev })
+}
+
+func TestPush_LogAppendChunked(t *testing.T) {
+	discardLogs(t)
+	setChunkBytes(t, 1)
+	url := newBackend(t, "tok")
+	root := newClientRoot(t)
+	writeFile(t, root, "history.jsonl",
+		`{"n":1}`+"\n"+`{"n":2}`+"\n"+`{"n":3}`+"\n"+`{"n":4}`+"\n")
+	c := newPushClient(t, url, "tok", root)
+
+	res, err := Push(context.Background(), c, DefaultAllowlist, 0, false)
+	if err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if res.LogLinesNew != 4 {
+		t.Errorf("LogLinesNew = %d, want 4", res.LogLinesNew)
+	}
+	res2, err := Push(context.Background(), c, DefaultAllowlist, 0, false)
+	if err != nil {
+		t.Fatalf("second push: %v", err)
+	}
+	if res2.LogLinesNew != 0 || res2.LogLinesDup != 0 {
+		t.Errorf("second push resent lines: new=%d dup=%d, want 0/0", res2.LogLinesNew, res2.LogLinesDup)
+	}
+}
+
+func TestPush_LogChunkPartialFailureKeepsProgress(t *testing.T) {
+	discardLogs(t)
+	setChunkBytes(t, 1)
+	backendURL := newBackend(t, "tok")
+	backend, err := neturl.Parse(backendURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var appendCalls atomic.Int32
+	var failing atomic.Bool
+	proxy := httputil.NewSingleHostReverseProxy(backend)
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/log/append" {
+			if appendCalls.Add(1) > 1 && failing.Load() {
+				http.Error(w, "injected failure", http.StatusInternalServerError)
+				return
+			}
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(front.Close)
+	failing.Store(true)
+
+	root := newClientRoot(t)
+	line1 := `{"n":1}`
+	writeFile(t, root, "history.jsonl",
+		line1+"\n"+`{"n":2}`+"\n"+`{"n":3}`+"\n")
+	c := newPushClient(t, front.URL, "tok", root)
+
+	res, err := Push(context.Background(), c, DefaultAllowlist, 0, false)
+	if err == nil {
+		t.Fatal("incomplete upload must report failure after saving progress")
+	}
+	if res.LogLinesNew != 1 {
+		t.Errorf("LogLinesNew = %d, want 1 (first chunk landed before failure)", res.LogLinesNew)
+	}
+	st, err := LoadState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOff := int64(len(line1) + 1)
+	if st.LogOffsets["history.jsonl"] != wantOff {
+		t.Errorf("LogOffsets = %d, want %d (progress through first chunk persisted)", st.LogOffsets["history.jsonl"], wantOff)
+	}
+
+	failing.Store(false)
+	res2, err := Push(context.Background(), c, DefaultAllowlist, 0, false)
+	if err != nil {
+		t.Fatalf("second push: %v", err)
+	}
+	if res2.LogLinesNew != 2 {
+		t.Errorf("second push LogLinesNew = %d, want 2", res2.LogLinesNew)
+	}
+	if res2.LogLinesDup != 0 {
+		t.Errorf("second push LogLinesDup = %d, want 0 (no line resent)", res2.LogLinesDup)
+	}
 }
 
 func TestPush_CleanSucceeds(t *testing.T) {
@@ -206,5 +344,24 @@ func TestPush_SecretsRedactedZeroWhenNoRedactPath(t *testing.T) {
 	}
 	if res.SecretsRedacted != 0 {
 		t.Errorf("SecretsRedacted = %d, want 0 (redact off)", res.SecretsRedacted)
+	}
+}
+
+func TestScanLogFileSkipsOversizedLines(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "big.jsonl")
+	big := strings.Repeat("A", MaxScanLine+10)
+	os.WriteFile(p, []byte("{\"ok\":1}\n{\"key\":\"AKIA"+big+"\"}\n"), 0o644)
+	info, _ := os.Stat(p)
+	e := FileEntry{RelPath: "big.jsonl", AbsPath: p, Size: info.Size(), IsLog: true}
+	done := make(chan []cheka.Finding, 1)
+	go func() { done <- scanLogFile(e, 0) }()
+	select {
+	case ff := <-done:
+		if len(ff) != 0 {
+			t.Fatalf("oversized line must not be scanned, got %d findings", len(ff))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("scanLogFile spent >5s on an oversized line")
 	}
 }

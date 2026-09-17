@@ -1,0 +1,15 @@
+{{ define "tool-Artifact" }}
+{{ $action := field . "action" }}{{ if not $action }}{{ $action = "publish" }}{{ end }}
+{{ $fp := field . "file_path" }}{{ $title := .ResultField "title" }}{{ $url := .ResultField "url" }}{{ if not $url }}{{ $url = field . "url" }}{{ end }}
+{{ $version := .ResultField "version" }}{{ $out := resultText .ResultContent }}
+<details>
+  <summary>
+    <div class="content-title">{{ if $url }}<a href="{{ $url }}" target="_blank" rel="noopener">{{ if $title }}{{ $title }}{{ else if $fp }}{{ basename $fp }}{{ else }}{{ $url }}{{ end }}</a>{{ else if $title }}{{ $title }}{{ else if $fp }}{{ basename $fp }}{{ else }}Artifact{{ end }}</div>
+    <div class="content-preview">{{ $action }}{{ if $version }} · v{{ $version }}{{ end }}{{ with field . "description" }} · {{ truncate . 120 }}{{ end }}{{ if and (not .HasResult) (ne $action "list") }} · pending{{ end }}</div>
+  </summary>
+  <div class="content-details">
+    {{ if $fp }}<div class="dim">file</div><pre class="selectable">{{ $fp }}</pre>{{ end }}
+    <div class="dim">Result</div><pre class="selectable">{{ if $out }}{{ $out }}{{ else }}No output{{ end }}</pre>
+  </div>
+</details>
+{{ end }}

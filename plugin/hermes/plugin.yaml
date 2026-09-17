@@ -1,0 +1,11 @@
+name: cccp
+version: 0.3.0
+description: "Mirror Hermes sessions as Claude-Code-shaped jsonl under <HERMES_HOME>/transcripts (live hooks + state.db backfill) and drive the cccp sync daemon (hook-start / hook-end). Adds /cccp."
+author: eordano
+provides_hooks:
+  - on_session_start
+  - pre_llm_call
+  - post_tool_call
+  - post_llm_call
+  - post_api_request
+  - on_session_finalize

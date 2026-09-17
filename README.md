@@ -30,6 +30,67 @@ cccp explore        # only open logs ui on .claude folder (no sync)
 
 ![pravda -- browse sessions as rich timelines, live across the fleet](docs/pravda.png)
 
+### SAE conversation map
+
+When an SAE dictionary is imported, Pravda shows feature activations in compact
+tracks below the conversation. Search the feature selector to toggle multiple
+features; colors stay consistent across tracks and message details. Select a
+message in the map to inspect its values and jump to the corresponding event.
+Overview and heatmap views provide alternative ways to explore the same data.
+
+Open **Settings → SAE display and status** to choose a dictionary, configure
+default features and colors, adjust the display threshold, and inspect index
+availability. Display preferences are saved in this browser per dictionary;
+individual conversations can override the defaults. Missing records are shown
+separately from imported records whose activations fall below the threshold.
+
+Activation percentages are rounded, scaled values clipped at 100. They are
+not probabilities or confidence scores and do not have to add up to 100.
+The same dictionary also analyzes thinking, tool inputs and text results, and
+other events containing readable text. These features describe Laguna’s
+representation of that text, regardless of which agent produced it. Image
+results and events containing only timing or other metadata are excluded.
+
+With on-demand scoring configured, viewing an unscored text event queues its SAE
+execution and shows progress while the conversation remains usable. Results
+are stored per message and dictionary and reused on later visits. Interrupted
+jobs resume after restart; temporary failures retry with capped backoff until
+the service recovers. Permanent errors stop retrying and show as failed.
+Inputs up to 1 MiB are supported. When the capture token limit is exceeded,
+the text is split without truncation and chunk activations are averaged by
+token count before SAE scoring. Chunks have independent model context; this
+is not equivalent to processing the entire text in one context window.
+Status covers
+the imported index and these jobs; it does not monitor external training.
+
+To enable scoring, pass `--sae-capture-url http://HOST:PORT` and
+`--sae-models-dir /path/to/models` to `cccp serve` (NixOS:
+`services.cccp.saeCaptureURL` and `saeModelsDir`). Each dictionary needs
+`models/ENCODER_SHA256/sae.safetensors` and its original `scored.safetensors`
+or a `scale.safetensors` containing the original `scale` tensor. The worker
+verifies the weights' SHA256 and preserves the dictionary's original scaling;
+new dictionaries need their matching files installed before on-demand scoring
+is available. The capture service must expose `/v1/laguna/capture`.
+
+## Other agents
+
+The same binary syncs Codex, Hermes and OpenCode. `--agent NAME` (or
+`CCCP_AGENT`, or `"agent"` in the config file) picks a profile: the agent's
+own state directory becomes `--dir`, the profile's allowlist decides what ships,
+and everything lands on the server under `agent/<name>/`, so the sessions show
+up in pravda alongside Claude's.
+
+```sh
+# per-agent config lives in the agent's own dir: ~/.codex/cccp/config.json,
+# ~/.hermes/cccp/config.json, ~/.local/share/opencode/cccp/config.json
+cccp watch --agent codex
+cccp push  --agent hermes
+```
+
+Codex already writes JSONL rollouts; Hermes and OpenCode need the plugin from
+`plugin/<agent>/`, which writes a JSONL transcript per session and starts the
+daemon via `cccp watch hook-start --agent <agent>` (see each plugin's README).
+
 ## The Apparatus
 
 One binary to rule them all. The party does not tolerate unnecessary

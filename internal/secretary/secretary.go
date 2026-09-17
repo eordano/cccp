@@ -12,13 +12,15 @@ import (
 )
 
 type Options struct {
-	Agent       *agent.Config
-	Root        string
-	Allowlist   []string
-	Debounce    time.Duration
-	Log         *slog.Logger
-	ChekaAllow  int
-	ChekaRedact bool
+	Agent             *agent.Config
+	Root              string
+	Allowlist         []string
+	Debounce          time.Duration
+	ReconcileInterval time.Duration
+	Log               *slog.Logger
+	ChekaAllow        int
+	ChekaRedact       bool
+	PushOnly          bool
 }
 
 func Run(ctx context.Context, opt Options) error {
@@ -43,14 +45,24 @@ func Run(ctx context.Context, opt Options) error {
 
 	opt.Log.Info("secretary starting", "root", opt.Root, "debounce", opt.Debounce)
 
-	go runWatcher(ctx, opt.Root, ignorePrefix, dirty, &localDirty, opt.Log)
+	allow := opt.Allowlist
+	if allow == nil {
+		allow = opt.Agent.DefaultAllowlist()
+	}
+	go runWatcher(ctx, opt.Root, ignorePrefix, allow, dirty, &localDirty, opt.Log)
 	go debounce(ctx, dirty, opt.Debounce, func() {
 		enqueue(triggers, kindPush)
 	})
-	go subscribeEvents(ctx, opt.Agent, opt.Log, func() {
-		enqueue(triggers, kindPull)
-	})
+	if opt.PushOnly {
+		opt.Log.Info("push-only: not subscribing to server events, pulls disabled")
+	} else {
+		go subscribeEvents(ctx, opt.Agent, opt.Log, func() {
+			enqueue(triggers, kindPull)
+		})
+	}
 
+	localDirty.Store(true)
+	enqueue(triggers, kindPush)
 	runSerializer(ctx, triggers, &localDirty, opt)
 	return nil
 }

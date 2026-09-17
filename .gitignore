@@ -16,3 +16,11 @@ result-*
 *.sqlite
 *.sqlite-wal
 internal/pravda/public/htmx.min.js
+*.sqlite-shm
+*.db
+*.db-*
+*.log
+.env
+.direnv/
+__pycache__/
+node_modules/

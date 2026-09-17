@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -33,6 +34,7 @@ type Session struct {
 	Entries  []Entry
 	Metadata string
 	Events   []*RawEvent
+	Facts    *sessionFacts
 }
 
 type SubAgentLoader func(agentID string) *Session
@@ -67,6 +69,7 @@ func Normalize(events []*RawEvent, loadSubAgent SubAgentLoader) *Session {
 		toolResults:       toolResults,
 		sidechainByTaskID: sidechainByTaskID,
 		loadSubAgent:      loadSubAgent,
+		seenPRURLs:        make(map[string]bool),
 	}
 
 	var entries []Entry
@@ -80,6 +83,7 @@ func Normalize(events []*RawEvent, loadSubAgent SubAgentLoader) *Session {
 	for i := range entries {
 		entries[i].Index = i + 1
 	}
+	entries = dropCodexItemDuplicates(entries)
 	return &Session{
 		Entries:  entries,
 		Metadata: buildMetadata(entries),
@@ -96,6 +100,13 @@ type normalizeCtx struct {
 	toolResults       map[string]toolResult
 	sidechainByTaskID map[string][]*RawEvent
 	loadSubAgent      SubAgentLoader
+
+	lastPermMode string
+	lastMode     string
+	lastModel    string
+	lastEffort   string
+	lastDate     string
+	seenPRURLs   map[string]bool
 }
 
 func enrichQueueOps(events []*RawEvent) {
@@ -188,16 +199,31 @@ func entriesFor(e *RawEvent, ctx *normalizeCtx) []Entry {
 	case "assistant":
 		out = assistantEntries(e, ts, ctx)
 	case "system":
-		if e.Subtype == "turn_duration" {
-			out = []Entry{{Kind: KindTurnDuration, TS: ts, DurationMs: e.DurationMs, MessageCount: e.MessageCount}}
-		} else {
-			out = []Entry{{Kind: KindSystem, TS: ts, Data: e.Raw}}
-		}
+		out = systemEntries(e, ts)
 	case "attachment":
-		subtype := gjsonString(e.Attachment, "type")
-		out = []Entry{{Kind: KindAttachment, TS: ts, Subtype: subtype, Attach: e.Attachment}}
+		out = attachmentEntries(e, ts, ctx)
+	case "model-change":
+		out = modelChangeEntries(e.Model, e.Effort, ts, ctx)
 	case "permission-mode":
+		if e.PermissionMode == ctx.lastPermMode {
+			return nil
+		}
+		ctx.lastPermMode = e.PermissionMode
 		out = []Entry{{Kind: KindPermissionMode, TS: ts, Mode: e.PermissionMode}}
+	case "mode":
+		if e.Mode == ctx.lastMode {
+			return nil
+		}
+		ctx.lastMode = e.Mode
+		out = []Entry{{Kind: KindMode, TS: ts, Mode: e.Mode}}
+	case "pr-link":
+		if e.PRUrl == "" || ctx.seenPRURLs[e.PRUrl] {
+			return nil
+		}
+		ctx.seenPRURLs[e.PRUrl] = true
+		out = []Entry{{Kind: KindPRLink, TS: ts, URL: e.PRUrl, Repo: e.PRRepository, Number: e.PRNumber}}
+	case "frame-link":
+		out = []Entry{{Kind: KindFrameLink, TS: ts, URL: e.FrameURL, Text: e.Title, Path: e.Path}}
 	case "queue-operation":
 		qc := e.queueCtx
 		entry := Entry{Kind: KindQueueOperation, TS: ts, Op: e.Operation}
@@ -210,7 +236,23 @@ func entriesFor(e *RawEvent, ctx *normalizeCtx) []Entry {
 		}
 		entry.Text = decodeString(e.Content)
 		out = []Entry{entry}
-	case "file-history-snapshot", "last-prompt":
+	case "started", "result":
+		if e.AgentID == "" {
+			out = []Entry{{Kind: KindUnknown, TS: ts, Data: e.Raw}}
+			break
+		}
+		entry := Entry{Kind: KindWorkflow, TS: ts, AgentID: e.AgentID, Op: e.Type}
+		if e.Type == "result" {
+			entry.Summary = gjsonString(e.Result, "summary")
+			if entry.Summary == "" {
+				entry.Summary = decodeString(e.Result)
+			}
+			entry.HasResult = true
+		}
+		out = []Entry{entry}
+	case "file-history-snapshot", "file-history-delta", "last-prompt",
+		"bridge-session", "ai-title", "custom-title", "agent-name", "summary",
+		"atis-latch", "cost-state", "session-meta", "usage", "fork-context-ref":
 		return nil
 	default:
 		out = []Entry{{Kind: KindUnknown, TS: ts, Data: e.Raw}}
@@ -233,7 +275,138 @@ var (
 	taskSummaryRe  = regexp.MustCompile(`(?s)<summary>(.*?)</summary>`)
 	taskResultRe   = regexp.MustCompile(`(?s)<result>(.*?)</result>`)
 	taskOutputFile = regexp.MustCompile(`(?s)<output-file>(.*?)</output-file>`)
+	bashInputRe    = regexp.MustCompile(`(?s)<bash-input>(.*?)</bash-input>`)
+	bashStdoutRe   = regexp.MustCompile(`(?s)<bash-stdout>(.*?)</bash-stdout>`)
+	bashStderrRe   = regexp.MustCompile(`(?s)<bash-stderr>(.*?)</bash-stderr>`)
+	totalTokensRe  = regexp.MustCompile(`(\d+)\s*tokens left`)
 )
+
+func attachmentEntries(e *RawEvent, ts string, ctx *normalizeCtx) []Entry {
+	subtype := gjsonString(e.Attachment, "type")
+	entry := Entry{Kind: KindAttachment, TS: ts, Subtype: subtype, Attach: e.Attachment}
+	switch subtype {
+	case "session_context", "silent_turn_reminder", "environment",
+		"batching_reminder_sent", "bash_output_audience_note":
+		return nil
+	case "model":
+		name := rawPath(e.Attachment, "identity", "marketingName")
+		if name == "" {
+			name = rawPath(e.Attachment, "identity", "modelId")
+		}
+		return modelChangeEntries(name, "", ts, ctx)
+	case "date":
+		d := gjsonString(e.Attachment, "date")
+		prev := ctx.lastDate
+		if d != "" {
+			ctx.lastDate = d
+		}
+		if d == "" || prev == "" || d == prev {
+			return nil
+		}
+		entry.Subtype = "date_change"
+		entry.Text = d
+	case "date_change":
+		entry.Text = gjsonString(e.Attachment, "newDate")
+		if entry.Text != "" {
+			ctx.lastDate = entry.Text
+		}
+	case "total_tokens_reminder":
+		if m := totalTokensRe.FindStringSubmatch(gjsonString(e.Attachment, "text")); m != nil {
+			entry.TokensLeft, _ = strconv.ParseInt(m[1], 10, 64)
+		}
+	case "read_truncation_notice":
+		entry.Text = gjsonString(e.Attachment, "banner")
+		entry.ToolUseID = gjsonString(e.Attachment, "toolUseID")
+	case "remote_session_change", "bridge_status":
+		entry.URL = gjsonString(e.Attachment, "url")
+	}
+	return []Entry{entry}
+}
+
+func modelChangeEntries(model, effort, ts string, ctx *normalizeCtx) []Entry {
+	if model == "" || (model == ctx.lastModel && effort == ctx.lastEffort) {
+		return nil
+	}
+	ctx.lastModel, ctx.lastEffort = model, effort
+	text := "model → " + model
+	if effort != "" {
+		text += " (effort " + effort + ")"
+	}
+	return []Entry{{Kind: KindMode, TS: ts, Subtype: "model-change", Mode: model, Effort: effort, Text: text}}
+}
+
+func systemEntries(e *RawEvent, ts string) []Entry {
+	switch e.Subtype {
+	case "turn_duration":
+		entry := Entry{Kind: KindTurnDuration, TS: ts, DurationMs: e.DurationMs, MessageCount: e.MessageCount}
+		if errText := gjsonString(e.Raw, "error"); errText != "" {
+			entry.Text = errText
+			entry.Level = "error"
+		}
+		return []Entry{entry}
+	case "goal":
+		entry := Entry{Kind: KindSystem, TS: ts, Subtype: e.Subtype, Text: decodeString(e.Content), Level: e.Level, Data: e.Raw}
+		for _, k := range []string{"goal", "text", "summary"} {
+			if entry.Text != "" {
+				break
+			}
+			entry.Text = gjsonString(e.Raw, k)
+		}
+		entry.Status = gjsonString(e.Raw, "status")
+		return []Entry{entry}
+	case "local_command":
+		s := decodeString(e.Content)
+		return []Entry{{
+			Kind: KindCommand, TS: ts,
+			CommandName:    firstMatch(cmdNameRe, s),
+			CommandMessage: firstMatch(cmdMessageRe, s),
+			CommandArgs:    firstMatch(cmdArgsRe, s),
+		}}
+	case "model_refusal_no_fallback", "model_refusal_fallback":
+		var fb struct {
+			FallbackModel string   `json:"fallbackModel"`
+			Direction     string   `json:"direction"`
+			Retracted     []string `json:"retractedMessageUuids"`
+		}
+		_ = json.Unmarshal(e.Raw, &fb)
+		text := e.APIRefusalExplanation
+		if text == "" {
+			text = decodeString(e.Content)
+		}
+		return []Entry{{
+			Kind: KindSystem, TS: ts, Subtype: e.Subtype,
+			Status:    e.APIRefusalCategory,
+			Text:      text,
+			Mode:      e.OriginalModel,
+			ToModel:   fb.FallbackModel,
+			Direction: fb.Direction,
+			Retracted: len(fb.Retracted),
+			Level:     e.Level,
+			Data:      e.Raw,
+		}}
+	case "bridge_status":
+		return []Entry{{Kind: KindSystem, TS: ts, Subtype: e.Subtype, Text: decodeString(e.Content), URL: gjsonString(e.Raw, "url"), Data: e.Raw}}
+	case "informational":
+		return []Entry{{Kind: KindSystem, TS: ts, Subtype: e.Subtype, Text: decodeString(e.Content), Level: e.Level, Data: e.Raw}}
+	case "compact_boundary":
+		entry := Entry{Kind: KindSystem, TS: ts, Subtype: e.Subtype, Text: decodeString(e.Content), Data: e.Raw}
+		var cm struct {
+			Trigger    string `json:"trigger"`
+			PreTokens  int64  `json:"preTokens"`
+			PostTokens int64  `json:"postTokens"`
+			DurationMs int64  `json:"durationMs"`
+		}
+		if err := json.Unmarshal(e.CompactMetadata, &cm); err == nil {
+			entry.Trigger = cm.Trigger
+			entry.PreTokens = cm.PreTokens
+			entry.PostTokens = cm.PostTokens
+			entry.DurationMs = cm.DurationMs
+		}
+		return []Entry{entry}
+	default:
+		return []Entry{{Kind: KindSystem, TS: ts, Subtype: e.Subtype, Text: decodeString(e.Content), HookCount: e.HookCount, Data: e.Raw}}
+	}
+}
 
 func userEntries(e *RawEvent, ts string) []Entry {
 	if e.Message == nil {
@@ -241,24 +414,7 @@ func userEntries(e *RawEvent, ts string) []Entry {
 	}
 	content := e.Message.Content
 	if len(content) > 0 && content[0] == '[' {
-		items := decodeContent(content)
-		allResults := len(items) > 0
-		for _, it := range items {
-			if it.Type != "tool_result" {
-				allResults = false
-				break
-			}
-		}
-		if allResults {
-			return nil
-		}
-		var out []Entry
-		for _, it := range items {
-			if it.Type == "text" && it.Text != "" {
-				out = append(out, Entry{Kind: KindInterrupt, TS: ts, Text: it.Text})
-			}
-		}
-		return out
+		return userListEntries(e, ts)
 	}
 	s := decodeString(content)
 	if s == "" {
@@ -267,7 +423,20 @@ func userEntries(e *RawEvent, ts string) []Entry {
 	if taskNotifRe.MatchString(s) {
 		return []Entry{parseTaskNotification(s, ts)}
 	}
-	if strings.HasPrefix(s, "<command-name>") {
+	if strings.HasPrefix(s, "<bash-input>") {
+		return []Entry{{Kind: KindBashInput, TS: ts, Text: firstMatch(bashInputRe, s)}}
+	}
+	if strings.HasPrefix(s, "<bash-stdout>") || strings.HasPrefix(s, "<bash-stderr>") {
+		return []Entry{{
+			Kind: KindBashOutput, TS: ts,
+			Text:   strings.TrimRight(firstMatch(bashStdoutRe, s), "\n"),
+			Stderr: strings.TrimRight(firstMatch(bashStderrRe, s), "\n"),
+		}}
+	}
+	if isInterruptText(s) {
+		return []Entry{{Kind: KindInterrupt, TS: ts, Text: s}}
+	}
+	if cmdNameRe.MatchString(s) || cmdMessageRe.MatchString(s) {
 		return []Entry{{
 			Kind: KindCommand, TS: ts,
 			CommandName:    firstMatch(cmdNameRe, s),
@@ -288,6 +457,34 @@ func userEntries(e *RawEvent, ts string) []Entry {
 	return []Entry{{Kind: KindUser, TS: ts, Text: s, CWD: e.CWD}}
 }
 
+func userListEntries(e *RawEvent, ts string) []Entry {
+	var out []Entry
+	var texts []string
+	meta := e.IsMeta
+	for _, it := range decodeContent(e.Message.Content) {
+		if it.Type != "text" || strings.TrimSpace(it.Text) == "" {
+			continue
+		}
+		if isInterruptText(it.Text) {
+			out = append(out, Entry{Kind: KindInterrupt, TS: ts, Text: strings.TrimSpace(it.Text)})
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(it.Text), "<fork-boilerplate>") {
+			meta = true
+		}
+		texts = append(texts, it.Text)
+	}
+	images := decodeImages(e.Message.Content)
+	if len(texts) == 0 && len(images) == 0 {
+		return out
+	}
+	entry := Entry{Kind: KindUser, TS: ts, Text: strings.Join(texts, "\n\n"), CWD: e.CWD, Images: images}
+	if meta {
+		entry.Kind = KindMeta
+	}
+	return append(out, entry)
+}
+
 func parseTaskNotification(content, ts string) Entry {
 	return Entry{
 		Kind: KindAgentResult, TS: ts,
@@ -305,15 +502,36 @@ func assistantEntries(e *RawEvent, ts string, ctx *normalizeCtx) []Entry {
 		return nil
 	}
 	items := decodeContent(e.Message.Content)
+	var rawItems []json.RawMessage
 	var out []Entry
-	for _, item := range items {
+	for i, item := range items {
 		switch item.Type {
 		case "text":
 			if strings.TrimSpace(item.Text) != "" {
-				out = append(out, Entry{Kind: KindMessage, TS: ts, Text: item.Text})
+				out = append(out, Entry{Kind: KindMessage, TS: ts, Text: item.Text, Model: e.Message.Model})
 			}
 		case "thinking":
 			out = append(out, Entry{Kind: KindThinking, TS: ts, Text: item.Thinking, HasBody: item.Thinking != ""})
+		case "fallback":
+			if rawItems == nil {
+				_ = json.Unmarshal(e.Message.Content, &rawItems)
+			}
+			var fb struct {
+				From struct {
+					Model string `json:"model"`
+				} `json:"from"`
+				To struct {
+					Model string `json:"model"`
+				} `json:"to"`
+			}
+			if i < len(rawItems) {
+				_ = json.Unmarshal(rawItems[i], &fb)
+			}
+			out = append(out, Entry{
+				Kind: KindSystem, TS: ts, Subtype: "model_fallback",
+				Mode: fb.From.Model, ToModel: fb.To.Model,
+				Text: "model fallback " + fb.From.Model + " → " + fb.To.Model,
+			})
 		case "tool_use":
 			entry := Entry{
 				Kind: KindTool, TS: ts,
@@ -413,4 +631,32 @@ func buildMetadata(entries []Entry) string {
 		}
 	}
 	return strings.Join(pieces, " · ")
+}
+
+func dropCodexItemDuplicates(entries []Entry) []Entry {
+	key := func(e *Entry) string {
+		for _, k := range []string{"file_path", "query", "url"} {
+			if v, ok := e.InputMap[k]; ok {
+				return k + "=" + string(v)
+			}
+		}
+		return ""
+	}
+	out := entries[:0]
+	lastTool := -1
+	for i := range entries {
+		e := &entries[i]
+		if e.Kind == KindTool {
+			if e.RawSource != nil && e.RawSource.CodexItem != "" && lastTool >= 0 {
+				if k := key(e); k != "" && k == key(&out[lastTool]) {
+					continue
+				}
+			}
+			out = append(out, *e)
+			lastTool = len(out) - 1
+			continue
+		}
+		out = append(out, *e)
+	}
+	return out
 }

@@ -264,3 +264,83 @@ func TestAPIAuth_BearerRequired(t *testing.T) {
 		t.Fatalf("missing-bearer: got %d, want 401", rec.Code)
 	}
 }
+
+func newPushTokenServer(t *testing.T) http.Handler {
+	t.Helper()
+	stub := &stubHandler{}
+	s := &Server{
+		Store:     newTestStore(t),
+		Token:     "full-token",
+		PushToken: "push-token",
+		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Watch:     stub,
+	}
+	return s.Routes()
+}
+
+func doAuthed(h http.Handler, method, path, bearer string) int {
+	req := httptest.NewRequest(method, path, strings.NewReader(""))
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Code
+}
+
+func TestPushToken_AuthorizesOnlyPushEndpoints(t *testing.T) {
+	h := newPushTokenServer(t)
+
+	// Write endpoints: push token must get past auth (anything but 401).
+	for _, c := range []struct{ method, path string }{
+		{http.MethodPost, "/ingest"},
+		{http.MethodPut, "/blob/deadbeef"},
+		{http.MethodPost, "/log/append"},
+	} {
+		if code := doAuthed(h, c.method, c.path, "push-token"); code == http.StatusUnauthorized {
+			t.Errorf("%s %s with push token: got 401, want authorized", c.method, c.path)
+		}
+	}
+
+	// Read endpoints: push token must be rejected with 401.
+	for _, c := range []struct{ method, path string }{
+		{http.MethodGet, "/current"},
+		{http.MethodGet, "/log/since"},
+		{http.MethodGet, "/events"},
+		{http.MethodGet, "/session/x"},
+	} {
+		if code := doAuthed(h, c.method, c.path, "push-token"); code != http.StatusUnauthorized {
+			t.Errorf("%s %s with push token: got %d, want 401", c.method, c.path, code)
+		}
+	}
+
+	// Full token still reaches everything.
+	for _, c := range []struct{ method, path string }{
+		{http.MethodPost, "/ingest"},
+		{http.MethodGet, "/current"},
+		{http.MethodGet, "/session/x"},
+	} {
+		if code := doAuthed(h, c.method, c.path, "full-token"); code == http.StatusUnauthorized {
+			t.Errorf("%s %s with full token: got 401, want authorized", c.method, c.path)
+		}
+	}
+}
+
+func TestPushToken_EmptyConfiguredNeverMatches(t *testing.T) {
+	// PushToken unset: an empty bearer must NOT match the empty push token
+	// (ConstantTimeCompare("", "") == 1 would otherwise be an auth bypass).
+	stub := &stubHandler{}
+	s := &Server{
+		Store: newTestStore(t),
+		Token: "full-token",
+		Log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Watch: stub,
+	}
+	h := s.Routes()
+	if code := doAuthed(h, http.MethodPost, "/ingest", ""); code != http.StatusUnauthorized {
+		t.Errorf("no bearer, no push token configured: got %d, want 401", code)
+	}
+	if code := doAuthed(h, http.MethodPost, "/log/append", ""); code != http.StatusUnauthorized {
+		t.Errorf("no bearer on /log/append: got %d, want 401", code)
+	}
+}
