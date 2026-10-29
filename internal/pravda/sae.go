@@ -23,6 +23,7 @@ type SaeTag struct {
 	Pct     int
 	ID      string
 	Encoder string
+	Votes   sae.FeatureVotes
 }
 
 type saeSessionData struct {
@@ -145,16 +146,18 @@ type saeFeatureRow struct {
 	sae.Feature
 	Count int
 	Share float64
-	Up    int
-	Down  int
+	Votes sae.FeatureVotes
 }
 
 type saeFeaturesPage struct {
 	Encoder string
+	Model   string
+	Layer   int
 	Total   int
 	Up      int
 	Down    int
 	Rows    []saeFeatureRow
+	Sort    map[string]saeSortHeader
 }
 
 type saeIndexPage struct {
@@ -200,17 +203,36 @@ func (s *WatchServer) handleSaeFeatures(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	votes, up, down, _ := s.Sae.FeatureVoteStats(ctx, enc)
+	votes, up, down, err := s.Sae.FeatureVoteStats(ctx, enc)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	page := saeFeaturesPage{Encoder: enc, Total: total, Up: up, Down: down}
+	if encs, err := s.Sae.EncoderCatalog(ctx); err == nil {
+		for _, e := range encs {
+			if e.Encoder == enc {
+				page.Model, page.Layer = e.Model, e.Layer
+			}
+		}
+	}
 	for f, c := range counts {
-		row := saeFeatureRow{Feature: feats[f], Count: c, Up: votes[f].Up, Down: votes[f].Down}
+		row := saeFeatureRow{Feature: feats[f], Count: c, Votes: votes[f]}
 		row.Feature.Feature = f
 		if total > 0 {
 			row.Share = float64(c) * 100 / float64(total)
 		}
 		page.Rows = append(page.Rows, row)
 	}
-	sort.Slice(page.Rows, func(i, j int) bool { return page.Rows[i].Count > page.Rows[j].Count })
+	order := readSaeSort(r.URL.Query(), "sort", saeFeatureSortKeys, "count")
+	sortSaeRows(page.Rows, order, func(row saeFeatureRow) saeVoteKey {
+		return saeVoteKey{ID: row.Feature.Feature, Value: row.Count, Votes: row.Votes}
+	})
+	u := *r.URL
+	q := u.Query()
+	q.Set("encoder", enc)
+	u.RawQuery = q.Encode()
+	page.Sort = saeSortHeaders(&u, "sort", order, saeFeatureSortKeys)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = tmpl.ExecuteTemplate(w, "sae-features-page", page)
 }
@@ -287,6 +309,8 @@ type saeInspectorData struct {
 	Detail      string
 	SettingsURL string
 	Tags        []SaeTag
+	Sort        map[string]saeSortHeader
+	NoVotes     bool
 }
 
 func saeInspector(data *saeSessionData, entry *Entry) *saeInspectorData {

@@ -9,7 +9,12 @@ var HermesAllowlist = []string{
 	"transcripts/",
 	"memories/",
 	"SOUL.md",
-	"config.yaml",
+}
+
+var HermesExclude = []string{
+	"transcripts/.backfill.json",
+	"transcripts/.backfill.json.tmp",
+	"transcripts/.backfill.lock",
 }
 
 func init() {
@@ -22,5 +27,6 @@ func init() {
 			return filepath.Join(home, ".hermes")
 		},
 		Allowlist: HermesAllowlist,
+		Exclude:   HermesExclude,
 	})
 }

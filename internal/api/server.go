@@ -29,10 +29,16 @@ type Server struct {
 	// UI stay full-token-only, so a host holding it can ship its own state
 	// but cannot read anything back.
 	PushToken string
+	// ReadToken, when non-empty, authorizes ONLY GET/HEAD on the readRoutes
+	// allowlist (readtoken.go). It is refused with 403 on every write, every
+	// review decision and the login form, so a holder can read sessions and
+	// SAE views but can never approve its own review-gate proposals.
+	ReadToken string
 	Log       *slog.Logger
 	Events    *Broadcaster
 	Watch     http.Handler
 	SaeDir    string
+	Precheck  string
 }
 
 func (s *Server) Routes() http.Handler {
@@ -48,6 +54,12 @@ func (s *Server) Routes() http.Handler {
 	apiMux.HandleFunc("GET /events", s.handleEvents)
 	apiMux.HandleFunc("POST /sae/import", s.handleSaeImport)
 	apiMux.HandleFunc("GET /sae/feedback", s.handleSaeFeedbackExport)
+	apiMux.HandleFunc("GET /review/api/list", s.handleReviewList)
+	apiMux.HandleFunc("GET /review/api/show", s.handleReviewShow)
+	apiMux.HandleFunc("POST /review/api/decide", s.handleReviewDecide)
+	apiMux.HandleFunc("GET /review", s.handleReviewPage)
+	apiMux.HandleFunc("GET /review/show", s.handleReviewShowPage)
+	apiMux.HandleFunc("POST /review/decide", s.handleReviewDecideForm)
 
 	outer := http.NewServeMux()
 	outer.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -65,7 +77,10 @@ func (s *Server) Routes() http.Handler {
 	outer.Handle("GET /events", authed)
 	outer.Handle("POST /sae/import", pushAuthed)
 	outer.Handle("GET /sae/feedback", authed)
+	outer.Handle("/review/api/", authed)
 	if s.Watch != nil {
+		outer.Handle("/review", s.cookieAuth(apiMux))
+		outer.Handle("/review/", s.cookieAuth(apiMux))
 
 		outer.HandleFunc("GET /login", s.handleLoginPage)
 		outer.HandleFunc("POST /login", s.handleLogin)
@@ -73,7 +88,7 @@ func (s *Server) Routes() http.Handler {
 	} else {
 		outer.Handle("/", authed)
 	}
-	return outer
+	return s.readGate(outer)
 }
 
 const cookieToken = "cccp_token"
@@ -81,6 +96,10 @@ const cookieToken = "cccp_token"
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if readOnly(r.Context()) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -118,7 +137,7 @@ func (s *Server) pushAuth(next http.Handler) http.Handler {
 
 func (s *Server) cookieAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
+		if r.Method == http.MethodOptions || readOnly(r.Context()) {
 			next.ServeHTTP(w, r)
 			return
 		}

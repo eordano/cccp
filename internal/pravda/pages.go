@@ -304,6 +304,7 @@ func (s *WatchServer) handleSession(w http.ResponseWriter, r *http.Request) {
 			BackURL: "/session/" + rel + "?encoder=" + url.QueryEscape(saeData.Encoder),
 			Sae:     saeInspector(saeData, entry),
 		}
+		s.saeInspectorTable(r.Context(), page.Inspector.Sae, saeData.Encoder, r.URL)
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -436,9 +437,7 @@ func (s *WatchServer) buildSidebar(ctx context.Context) ([]*flatItem, error) {
 	var flat []*flatItem
 	for _, g := range groups {
 		item := &flatItem{File: g.Session, Folder: g.Session.Folder}
-		for _, a := range g.Agents {
-			item.Agents = append(item.Agents, a)
-		}
+		item.Agents = append(item.Agents, g.Agents...)
 		flat = append(flat, item)
 	}
 	sort.Slice(flat, func(i, j int) bool { return flat[i].File.Modified > flat[j].File.Modified })

@@ -68,8 +68,27 @@ func TestLocalRel(t *testing.T) {
 }
 
 func TestNewRejectsUnknownAgent(t *testing.T) {
-	if _, err := New(t.TempDir(), "http://x", "tok", "nope"); err == nil {
-		t.Fatal("expected unknown agent error")
+	for _, name := range []string{"nope", "nope-x", "claude-x", "hermes-", "hermes-Fizz"} {
+		if _, err := New(t.TempDir(), "http://x", "tok", name); err == nil {
+			t.Fatalf("%q: expected unknown agent error", name)
+		}
+	}
+	t.Setenv("HOME", t.TempDir())
+	own, err := New(t.TempDir(), "http://x", "tok", "hermes-buzz-fizz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if own.Agent != "hermes-buzz-fizz" || own.Prefix != "agent/hermes-buzz-fizz/" {
+		t.Fatalf("own space: %q %q", own.Agent, own.Prefix)
+	}
+	if got := own.DefaultAllowlist(); len(got) != len(HermesAllowlist) || got[0] != HermesAllowlist[0] {
+		t.Fatalf("own space allowlist = %v, want the hermes profile's", got)
+	}
+	if rel, ok := own.localRel("agent/hermes-buzz-fizz/transcripts/x.jsonl"); !ok || rel != "transcripts/x.jsonl" {
+		t.Fatalf("own space path: %q %v", rel, ok)
+	}
+	if _, ok := own.localRel("agent/hermes/transcripts/x.jsonl"); ok {
+		t.Fatal("an own space must ignore the shared hermes space")
 	}
 	c, err := New(t.TempDir(), "http://x", "tok", "")
 	if err != nil {

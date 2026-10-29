@@ -10,14 +10,14 @@ _cccp() {
         cword=$COMP_CWORD
     fi
 
-    local commands="serve push pull watch explore host-id help"
+    local commands="serve push pull watch explore index host-id help"
     local global_flags="--dir --url --server-url --token --addr --address --port --db --database --db-path --config -h --help"
 
     local cmd=""
     local i
     for (( i=1; i < cword; i++ )); do
         case "${COMP_WORDS[i]}" in
-            serve|push|pull|watch|explore|host-id|help) cmd=${COMP_WORDS[i]}; break ;;
+            serve|push|pull|watch|explore|index|host-id|help) cmd=${COMP_WORDS[i]}; break ;;
         esac
     done
 
@@ -60,6 +60,7 @@ _cccp() {
         watch)       flags="$global_flags --debounce-ms --cheka-allow --cheka-redact" ;;
         explore)     flags="-p --port -h --help" ;;
         serve|host-id) flags="$global_flags" ;;
+        index) flags="rebuild update status --fresh $global_flags" ;;
         help)        flags="" ;;
     esac
 

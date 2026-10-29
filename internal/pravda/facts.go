@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/eordano/cccp/internal/syncclass"
 )
 
 type sessionFacts struct {
@@ -38,7 +40,17 @@ func agentDisplayName(agent string) string {
 	if n, ok := agentNames[agent]; ok {
 		return n
 	}
+	if kind := agentKind(agent); kind != agent {
+		return agentDisplayName(kind) + " · " + strings.TrimPrefix(agent, kind+"-")
+	}
 	return strings.ToUpper(agent[:1]) + agent[1:]
+}
+
+func agentKind(agent string) string {
+	if kind := syncclass.Kind(agent); kind != "" {
+		return kind
+	}
+	return agent
 }
 
 func agentOfPath(rel string) string {
@@ -323,17 +335,9 @@ type sidebarGroup struct {
 	Items []*flatItem
 }
 
-var extraRegistry = map[string]any{}
-
-func registerExtra(name string, fn any) { extraRegistry[name] = fn }
-
 func extraFuncs() map[string]any {
-	out := map[string]any{
+	return map[string]any{
 		"fmtTokens": fmtTokens,
 		"fmtUSD":    fmtUSD,
 	}
-	for k, v := range extraRegistry {
-		out[k] = v
-	}
-	return out
 }

@@ -73,7 +73,7 @@ The sandboxed-agents `hermes` wrapper does both for you (see its README).
 }
 ```
 
-What syncs: `transcripts/`, `memories/`, `SOUL.md`, `config.yaml`. Never: `state.db`, `.env`, `auth.json`, caches.
+What syncs: `transcripts/`, `memories/`, `SOUL.md`. Never: `config.yaml` (until 2026-10-28; its server versions stay as history), `state.db`, `.env`, `auth.json`, caches, the backfill stamp.
 
 ## Backfill
 
@@ -97,18 +97,21 @@ session, so the daemon ships them like any other file under `transcripts/`.
   are session totals, not per-turn steps.
 - Transcripts backfilled before these lines existed are not touched on a
   normal run (the stamp's `last_id`/`size` match); deleting
-  `transcripts/.backfill.json` appends the new `model-change`/`usage` lines
+  `cccp/backfill.json` appends the new `model-change`/`usage` lines
   at the end of each file (uuid dedup keeps everything else), while lines
   already written keep their old tool names and lack `isMeta`.
-- `transcripts/.backfill.json` records `last_id`/`size` per session; a later
+- `cccp/backfill.json` records `last_id`/`size` per session; a later
   launch only touches sessions with new messages. Deleting the stamp is
-  safe: existing lines are deduped on `uuid`.
+  safe: existing lines are deduped on `uuid`. It lives outside
+  `transcripts/` so it never syncs; a stamp left at the old
+  `transcripts/.backfill.json` is copied over once, on the first run that
+  finds no new one, and left in place.
 - Skipped: sessions with no messages, the sessions this process' live hooks
   own, sessions with no `ended_at` and a message in the last 15 min (likely
   live in another Hermes), and transcripts the live hooks wrote (a file with
   none of our deterministic uuids is left alone forever).
 - Each run is capped at 20 s and resumes on the next launch; a
-  `transcripts/.backfill.lock` flock keeps two Hermes processes from
+  `cccp/backfill.lock` flock keeps two Hermes processes from
   backfilling at once. Everything is fail-open and logged via the Hermes
   logger. `CCCP_BACKFILL=0` disables the automatic run.
 

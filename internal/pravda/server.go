@@ -3,7 +3,6 @@ package pravda
 import (
 	"context"
 	"embed"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/eordano/cccp/internal/sae"
@@ -17,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 )
 
 //go:embed public/*
@@ -29,7 +28,6 @@ type WatchServer struct {
 	SaeScorer saeExecutor
 	SaeDir    string
 	assets    fs.FS
-	upgrader  websocket.Upgrader
 
 	clientsMu sync.Mutex
 	clients   map[*websocket.Conn]struct{}
@@ -55,13 +53,12 @@ type sidebarState struct {
 func NewWatchServer(store SessionStore) *WatchServer {
 	assets, _ := fs.Sub(publicFS, "public")
 	return &WatchServer{
-		Store:    withConverters(store),
-		assets:   assets,
-		upgrader: websocket.Upgrader{CheckOrigin: checkOrigin},
-		clients:  map[*websocket.Conn]struct{}{},
-		live:     newLiveHub(),
-		cache:    newLiveCache(),
-		parsed:   newParsedCache(),
+		Store:   withConverters(store),
+		assets:  assets,
+		clients: map[*websocket.Conn]struct{}{},
+		live:    newLiveHub(),
+		cache:   newLiveCache(),
+		parsed:  newParsedCache(),
 	}
 }
 
@@ -85,6 +82,7 @@ func (s *WatchServer) Routes() http.Handler {
 	mux.HandleFunc("GET /sae", s.handleSaeIndex)
 	mux.HandleFunc("GET /sae/{$}", s.handleSaeIndex)
 	mux.HandleFunc("GET /sae/features", s.handleSaeFeatures)
+	mux.HandleFunc("GET /sae/feature/{id}", s.handleSaeFeature)
 	mux.HandleFunc("GET /sae/settings", s.handleSaeSettings)
 	mux.HandleFunc("GET /sae/session/{path...}", s.handleSaeSession)
 	mux.HandleFunc("GET /sae/daily/{file...}", s.handleSaeDaily)
@@ -92,6 +90,7 @@ func (s *WatchServer) Routes() http.Handler {
 	mux.HandleFunc("POST /feedback/{path...}", s.handleFeedback)
 	mux.HandleFunc("GET /subagent/{path...}", s.handleSubAgent)
 	mux.HandleFunc("POST /settings/{key}", s.handleSettings)
+	s.registerIndexRoutes(mux)
 
 	mux.HandleFunc("/", s.handleStatic)
 	return corsMiddleware(mux)
@@ -146,12 +145,13 @@ func (s *WatchServer) handleStatic(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *WatchServer) handleWS(w http.ResponseWriter, r *http.Request) {
-	conn, err := s.upgrader.Upgrade(w, r, nil)
+	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		log.Println("upgrade:", err)
 		return
 	}
-	defer conn.Close()
+	defer conn.CloseNow()
+	conn.SetReadLimit(-1)
 
 	s.clientsMu.Lock()
 	s.clients[conn] = struct{}{}
@@ -164,7 +164,7 @@ func (s *WatchServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	for {
-		if _, _, err := conn.ReadMessage(); err != nil {
+		if _, _, err := conn.Read(r.Context()); err != nil {
 			return
 		}
 	}
@@ -181,14 +181,14 @@ func (s *WatchServer) broadcast(msg string) {
 	payload := []byte(msg)
 	var dead []*websocket.Conn
 	for _, c := range snap {
-		if err := c.WriteMessage(websocket.TextMessage, payload); err != nil {
+		if err := c.Write(context.Background(), websocket.MessageText, payload); err != nil {
 			dead = append(dead, c)
 		}
 	}
 	if len(dead) > 0 {
 		s.clientsMu.Lock()
 		for _, c := range dead {
-			c.Close()
+			c.CloseNow()
 			delete(s.clients, c)
 		}
 		s.clientsMu.Unlock()
@@ -276,22 +276,4 @@ func originAllowed(origin, host string) bool {
 		return true
 	}
 	return false
-}
-
-func checkOrigin(r *http.Request) bool {
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		return true
-	}
-	host := r.Host
-
-	if i := strings.Index(origin, "://"); i >= 0 {
-		origin = origin[i+3:]
-	}
-	return origin == host
-}
-
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
 }

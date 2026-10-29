@@ -3,6 +3,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { spawnSync } from "node:child_process"
+import { createHash } from "node:crypto"
 
 const AGENT = "opencode"
 const CCCP = process.env.CCCP_BIN || "cccp"
@@ -12,6 +13,7 @@ const BACKFILL_BUDGET_MS = envInt("CCCP_BACKFILL_BUDGET_MS", 20000)
 const BACKFILL_PAGE = 50
 const BACKFILL_GAP_MS = 100
 const BACKFILL_LOCK_STALE_MS = 10 * 60 * 1000
+const SEEN_MAX = 8192
 
 function envInt(name, fallback) {
   const n = Number(process.env[name])
@@ -20,26 +22,31 @@ function envInt(name, fallback) {
 
 const TOOL_NAMES = {
   bash: "Bash",
+  shell: "Bash",
   read: "Read",
   write: "Write",
   edit: "Edit",
   multiedit: "MultiEdit",
   patch: "Edit",
+  apply_patch: "Edit",
   glob: "Glob",
   grep: "Grep",
   list: "LS",
   webfetch: "WebFetch",
   websearch: "WebSearch",
   todowrite: "TodoWrite",
+  todo: "TodoWrite",
   todoread: "TodoRead",
   task: "Agent",
+  subagent: "Agent",
   question: "AskUserQuestion",
   skill: "Skill",
 }
 const INPUT_ALIASES = { filePath: "file_path", oldString: "old_string", newString: "new_string" }
-const SKIP_PARTS = new Set(["step-start", "snapshot", "agent", "retry", "compaction", "subtask"])
-const META_PARTS = new Set(["step-finish", "patch"])
+const PATH_TOOLS = new Set(["read", "write", "edit"])
 const META_TEXT = /^\s*<[a-z][a-z0-9_-]*>/
+const META_LINES = new Set(["session-meta", "ai-title"])
+const TERMINAL = new Set(["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"])
 
 function dataRoot() {
   const xdg = process.env.XDG_DATA_HOME
@@ -53,6 +60,18 @@ const LOG = path.join(ROOT, "cccp", "opencode-plugin.log")
 const STAMP = path.join(ROOT, "cccp", "backfill.json")
 const LOCK = path.join(ROOT, "cccp", "backfill.lock")
 
+const STATE_KEY = Symbol.for(`cccp.opencode:${ROOT}`)
+const state = (globalThis[STATE_KEY] ??= {
+  sessions: new Map(),
+  seen: new Set(),
+  exitHooked: false,
+  missingLogged: false,
+  closing: false,
+  backfillStarted: false,
+  backfillRun: null,
+})
+const sessions = state.sessions
+
 function log(msg) {
   try {
     fs.mkdirSync(path.dirname(LOG), { recursive: true })
@@ -64,23 +83,28 @@ function iso(ms) {
   return new Date(typeof ms === "number" && ms > 0 ? ms : Date.now()).toISOString()
 }
 
-function aliasInput(input) {
+function aliasInput(tool, input) {
   if (!input || typeof input !== "object") return input ?? {}
   const out = { ...input }
   for (const [from, to] of Object.entries(INPUT_ALIASES)) {
     if (from in out && !(to in out)) out[to] = out[from]
   }
+  if (PATH_TOOLS.has(tool) && typeof out.path === "string" && !("file_path" in out)) out.file_path = out.path
   return out
 }
 
-const sessions = new Map()
-let exitHooked = false
-let missingLogged = false
+function firstSeen(id) {
+  if (!id) return true
+  if (state.seen.has(id)) return false
+  state.seen.add(id)
+  if (state.seen.size > SEEN_MAX) state.seen.delete(state.seen.values().next().value)
+  return true
+}
 
 function spawnError(which, s, err) {
   if (err?.code === "ENOENT") {
-    if (missingLogged) return
-    missingLogged = true
+    if (state.missingLogged) return
+    state.missingLogged = true
     log(`${CCCP} not found on PATH; transcripts are written but not synced`)
     return
   }
@@ -91,11 +115,12 @@ function readWritten(file) {
   const written = new Set()
   let last = null
   let model = null
+  let lastTs = 0
   let data
   try {
     data = fs.readFileSync(file, "utf8")
   } catch {
-    return { written, last, model }
+    return { written, last, model, lastTs }
   }
   for (const line of data.split("\n")) {
     if (!line.trim()) continue
@@ -105,17 +130,32 @@ function readWritten(file) {
         written.add(parsed.uuid)
         last = parsed.uuid
       }
+      if (!META_LINES.has(parsed.type)) lastTs = Math.max(lastTs, Date.parse(parsed.timestamp) || 0)
       if (parsed.type === "model-change" && parsed.model) model = parsed.model
       else if (parsed.type === "assistant" && parsed.message?.model) model = parsed.message.model
     } catch {}
   }
-  return { written, last, model }
+  return { written, last, model, lastTs }
 }
 
-function newSession(id, { created = false, info, directory } = {}) {
+function newSession(id, { info, directory } = {}) {
   const file = path.join(TRANSCRIPTS, `${id}.jsonl`)
-  const { written, last, model } = readWritten(file)
-  return { id, file, written, last, model, info: info ?? null, directory, messages: new Map(), hooked: false, resumed: !created, backfilled: false }
+  const { written, last, model, lastTs } = readWritten(file)
+  return {
+    id,
+    file,
+    written,
+    last,
+    model,
+    lastTs,
+    info: info ?? null,
+    directory,
+    steps: new Map(),
+    inbox: new Map(),
+    hooked: false,
+    loading: null,
+    queue: [],
+  }
 }
 
 function ensureSession(id, opts = {}) {
@@ -124,21 +164,12 @@ function ensureSession(id, opts = {}) {
     s = newSession(id, opts)
     sessions.set(id, s)
   }
-  if (opts.info) s.info = opts.info
   return s
-}
-
-function ensureMessage(s, id) {
-  let m = s.messages.get(id)
-  if (!m) {
-    m = { id, info: null, parts: new Map(), done: false, skipped: new Set() }
-    s.messages.set(id, m)
-  }
-  return m
 }
 
 function append(s, uuid, line) {
   if (s.written.has(uuid)) return
+  if (line.type !== "session-meta" && line.type !== "ai-title") flushMeta(s, s.metaOpts)
   line.uuid = uuid
   line.parentUuid = s.last
   fs.mkdirSync(TRANSCRIPTS, { recursive: true })
@@ -147,12 +178,16 @@ function append(s, uuid, line) {
   s.last = uuid
 }
 
-function base(s, type, ts, cwd) {
+function cwdOf(s) {
+  return s.info?.directory ?? s.directory ?? process.cwd()
+}
+
+function base(s, type, ts) {
   return {
     parentUuid: null,
     isSidechain: false,
     userType: "external",
-    cwd: cwd ?? s.info?.directory ?? s.directory ?? process.cwd(),
+    cwd: cwdOf(s),
     sessionId: s.id,
     version: s.info?.version ?? "",
     agent: AGENT,
@@ -162,183 +197,265 @@ function base(s, type, ts, cwd) {
   }
 }
 
-function userText(m) {
-  const texts = []
-  let meta = false
-  for (const p of m.parts.values()) {
-    if (p.type === "text" && p.text) {
-      texts.push(p.text)
-      if (texts.length === 1) meta = p.synthetic === true || META_TEXT.test(p.text)
-    } else if (p.type === "file") texts.push(`[file: ${p.filename ?? p.url ?? ""}]`)
-  }
-  return { text: texts.join("\n\n"), meta }
-}
-
-function flushUser(s, m) {
-  if (s.written.has(m.id)) return
-  const { text, meta } = userText(m)
-  if (!text) return
-  const info = m.info
-  const line = { ...base(s, "user", info?.time?.created) }
-  if (meta) line.isMeta = true
-  line.message = { role: "user", content: text }
-  append(s, m.id, line)
-}
-
-function modelOf(info) {
-  return info?.providerID && info?.modelID ? `${info.providerID}/${info.modelID}` : info?.modelID ?? ""
-}
-
-function flushModel(s, m) {
-  const model = modelOf(m.info)
-  if (!model || model === s.model) return
-  const uuid = `${m.id}-model`
-  if (!s.written.has(uuid)) append(s, uuid, { ...base(s, "model-change", m.info.time?.created, m.info.path?.cwd), model, effort: "" })
-  s.model = model
-}
-
-function flushStepParts(s, m) {
-  const info = m.info
-  const ts = info.time?.completed ?? info.time?.created
-  for (const p of m.parts.values()) {
-    if (!META_PARTS.has(p.type) || s.written.has(p.id)) continue
-    if (p.type === "step-finish") {
-      const t = p.tokens ?? {}
-      append(s, p.id, {
-        ...base(s, "usage", ts, info.path?.cwd),
-        model: modelOf(info),
-        usage: {
-          input_tokens: t.input ?? 0,
-          output_tokens: (t.output ?? 0) + (t.reasoning ?? 0),
-          cache_read_input_tokens: t.cache?.read ?? 0,
-          cache_creation_input_tokens: t.cache?.write ?? 0,
-          reasoning_tokens: t.reasoning ?? 0,
-        },
-        costUSD: typeof p.cost === "number" ? p.cost : 0,
-        stepReason: p.reason ?? "",
-      })
-    } else {
-      const files = Array.isArray(p.files) ? p.files.filter((f) => typeof f === "string") : []
-      if (!files.length) {
-        m.skipped.add(p.id)
-        continue
-      }
-      append(s, p.id, { ...base(s, "system", ts, info.path?.cwd), subtype: "patch", content: files.join("\n"), files, hash: p.hash ?? "" })
+function gitInfo(dir) {
+  const out = {}
+  if (!dir) return out
+  for (const [key, args] of [["gitBranch", ["rev-parse", "--abbrev-ref", "HEAD"]], ["gitCommit", ["rev-parse", "HEAD"]]]) {
+    let r
+    try {
+      r = spawnSync("git", ["-C", dir, ...args], { encoding: "utf8", timeout: 2000 })
+    } catch {
+      return out
     }
+    const v = (r.stdout ?? "").trim()
+    if (r.status !== 0 || !v) return out
+    if (v !== "HEAD") out[key] = v
+  }
+  return out
+}
+
+function userName() {
+  if (process.env.USER) return process.env.USER
+  try {
+    return os.userInfo().username
+  } catch {
+    return ""
   }
 }
 
-function partFinal(p) {
-  switch (p.type) {
-    case "text":
-    case "reasoning":
-      return p.time?.end != null
-    case "tool":
-      return p.state?.status === "completed" || p.state?.status === "error"
-    default:
-      return true
+function flushMeta(s, { git = true } = {}) {
+  const info = s.info
+  if (!info) return
+  const uuid = `${s.id}-meta`
+  if (!s.written.has(uuid)) {
+    const line = { ...base(s, "session-meta", info.created), agentSource: info.parentID ? "subagent" : "" }
+    if (info.parentID) line.parentSessionId = info.parentID
+    const user = userName()
+    if (user) line.user = user
+    if (git) Object.assign(line, gitInfo(cwdOf(s)))
+    append(s, uuid, line)
+  }
+  const title = typeof info.title === "string" ? info.title.trim() : ""
+  if (title && !/^(New session|Child session) - /.test(title)) {
+    const tuuid = `${s.id}-title-${createHash("sha1").update(title).digest("hex").slice(0, 12)}`
+    if (!s.written.has(tuuid)) append(s, tuuid, { ...base(s, "ai-title", info.updated ?? info.created), aiTitle: title })
   }
 }
 
-function assistantLine(s, m, ts, block, last) {
-  const info = m.info
+function infoFromSession(row, version) {
+  const info = { id: row.id, directory: row.location?.directory ?? row.directory, version: version ?? "", title: row.title }
+  if (row.parentID) info.parentID = row.parentID
+  if (row.time?.created) info.created = row.time.created
+  if (row.time?.updated) info.updated = row.time.updated
+  return info
+}
+
+function promptText(text, files) {
+  const texts = []
+  if (typeof text === "string" && text) texts.push(text)
+  for (const f of Array.isArray(files) ? files : []) texts.push(`[file: ${f?.name ?? f?.source?.uri ?? ""}]`)
+  return texts.join("\n\n")
+}
+
+function writeUser(s, uuid, ts, text, meta) {
+  if (s.written.has(uuid) || !text) return
+  const line = { ...base(s, "user", ts) }
+  if (meta || META_TEXT.test(text)) line.isMeta = true
+  line.message = { role: "user", content: text }
+  append(s, uuid, line)
+}
+
+function modelOf(model) {
+  if (!model) return ""
+  if (typeof model === "string") return model
+  return model.providerID && model.id ? `${model.providerID}/${model.id}` : (model.id ?? "")
+}
+
+function newStep(id, model, created) {
+  return { id, model: modelOf(model), created, items: [], done: false, finish: null, tokens: null, cost: 0, error: null, completed: null, files: [], hash: "", ended: false }
+}
+
+function itemOf(step, key, kind) {
+  let it = step.items.find((x) => x.key === key)
+  if (!it) {
+    it = { key, kind, final: false, text: "", start: null, end: null, name: "", callID: "", input: {}, result: "", isErr: false }
+    step.items.push(it)
+  }
+  return it
+}
+
+function flushModel(s, step) {
+  if (!step.model || step.model === s.model) return
+  const uuid = `${step.id}-model`
+  if (!s.written.has(uuid)) append(s, uuid, { ...base(s, "model-change", step.created), model: step.model, effort: "" })
+  s.model = step.model
+}
+
+function assistantLine(s, step, ts, block, last) {
   const msg = {
-    id: m.id,
+    id: step.id,
     type: "message",
     role: "assistant",
-    model: modelOf(info),
+    model: step.model,
     content: [block],
-    stop_reason: last ? info?.finish ?? null : null,
+    stop_reason: last ? (step.finish ?? null) : null,
     stop_sequence: null,
   }
-  if (last && info?.tokens) {
+  if (last && step.tokens) {
     msg.usage = {
-      input_tokens: info.tokens.input ?? 0,
-      output_tokens: info.tokens.output ?? 0,
-      cache_read_input_tokens: info.tokens.cache?.read ?? 0,
-      cache_creation_input_tokens: info.tokens.cache?.write ?? 0,
+      input_tokens: step.tokens.input ?? 0,
+      output_tokens: step.tokens.output ?? 0,
+      cache_read_input_tokens: step.tokens.cache?.read ?? 0,
+      cache_creation_input_tokens: step.tokens.cache?.write ?? 0,
     }
   }
-  return { ...base(s, "assistant", ts, info?.path?.cwd), message: msg }
+  return { ...base(s, "assistant", ts), message: msg }
 }
 
-function flushAssistant(s, m, force) {
-  if (!m.info) return
-  flushModel(s, m)
-  const parts = [...m.parts.values()].filter((p) => !(SKIP_PARTS.has(p.type) || META_PARTS.has(p.type) || (p.type === "text" && p.ignored)))
-  for (let i = 0; i < parts.length; i++) {
-    const p = parts[i]
-    if (s.written.has(p.id) || m.skipped.has(p.id)) continue
-    if (!partFinal(p) && !(force || m.done)) break
-    const last = (m.done || force) && i === parts.length - 1
-    switch (p.type) {
+function itemUuid(step, it) {
+  return `${step.id}-${it.key}`
+}
+
+function flushStep(s, step, force = false) {
+  flushModel(s, step)
+  const closing = step.done || force
+  const items = step.items.filter((it) => !(it.kind === "text" && it.final && !it.text.trim()))
+  let prevEnd = step.created
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i]
+    const ts = it.kind === "text" ? prevEnd : (it.start ?? prevEnd)
+    if (it.end != null) prevEnd = it.end
+    else if (it.kind !== "text" && it.start != null) prevEnd = it.start
+    const uuid = itemUuid(step, it)
+    if (s.written.has(uuid)) continue
+    const last = i === items.length - 1
+    if (!closing && (!it.final || last)) break
+    switch (it.kind) {
       case "text":
-        if (p.text && p.text.trim()) {
-          append(s, p.id, assistantLine(s, m, p.time?.start, { type: "text", text: p.text }, last))
-        } else {
-          m.skipped.add(p.id)
-        }
+        if (it.text.trim()) append(s, uuid, assistantLine(s, step, ts, { type: "text", text: it.text }, closing && last))
         break
       case "reasoning":
-        append(s, p.id, assistantLine(s, m, p.time?.start, { type: "thinking", thinking: p.text ?? "", signature: "" }, last))
+        append(s, uuid, assistantLine(s, step, ts, { type: "thinking", thinking: it.text ?? "", signature: "" }, closing && last))
         break
       case "tool": {
-        const st = p.state ?? {}
-        append(
-          s,
-          p.id,
-          assistantLine(
-            s,
-            m,
-            st.time?.start,
-            { type: "tool_use", id: p.callID, name: TOOL_NAMES[p.tool] ?? p.tool, input: aliasInput(st.input) },
-            false,
-          ),
-        )
-        const isErr = st.status === "error"
-        const content = isErr ? String(st.error ?? "error") : String(st.output ?? "")
+        append(s, uuid, assistantLine(s, step, ts, { type: "tool_use", id: it.callID, name: TOOL_NAMES[it.name] ?? it.name, input: aliasInput(it.name, it.input) }, false))
         const result = {
-          ...base(s, "user", st.time?.end ?? st.time?.start, m.info?.path?.cwd),
-          message: { role: "user", content: [{ type: "tool_result", tool_use_id: p.callID, content, is_error: isErr }] },
+          ...base(s, "user", it.end ?? ts),
+          message: { role: "user", content: [{ type: "tool_result", tool_use_id: it.callID, content: it.final ? it.result : "", is_error: it.isErr }] },
         }
-        if (st.title) result.toolUseResult = { title: st.title }
-        append(s, `${p.id}-result`, result)
+        append(s, `${uuid}-result`, result)
         break
       }
-      default:
-        m.skipped.add(p.id)
     }
   }
-  if ((m.done || force) && m.info?.error && !s.written.has(`${m.id}-error`)) {
-    const e = m.info.error
-    const text = `Error: ${e.name ?? "UnknownError"}${e.data?.message ? `: ${e.data.message}` : ""}`
-    append(s, `${m.id}-error`, assistantLine(s, m, m.info.time?.completed, { type: "text", text }, true))
+  if (!closing) return
+  if (step.error && !s.written.has(`${step.id}-error`)) {
+    const e = step.error
+    const text = `Error: ${e.type ?? e.name ?? "UnknownError"}${e.message ? `: ${e.message}` : ""}`
+    append(s, `${step.id}-error`, assistantLine(s, step, step.completed ?? prevEnd, { type: "text", text }, true))
   }
-  if (m.done || force) flushStepParts(s, m)
-}
-
-function flushMessage(s, m, force = false) {
-  if (!m.info) return
-  if (m.info.role === "user") {
-    if (force || m.done) flushUser(s, m)
-    return
+  if (!step.ended) return
+  const ts = step.completed ?? prevEnd
+  const files = step.files.filter((f) => typeof f === "string")
+  if (files.length && !s.written.has(`${step.id}-patch`)) {
+    append(s, `${step.id}-patch`, { ...base(s, "system", ts), subtype: "patch", content: files.join("\n"), files, hash: step.hash ?? "" })
   }
-  if (m.info.parentID) {
-    const parent = s.messages.get(m.info.parentID)
-    if (parent && parent.info?.role === "user") {
-      parent.done = true
-      flushUser(s, parent)
-    }
+  if (step.tokens && !s.written.has(`${step.id}-usage`)) {
+    const t = step.tokens
+    append(s, `${step.id}-usage`, {
+      ...base(s, "usage", ts),
+      model: step.model,
+      usage: {
+        input_tokens: t.input ?? 0,
+        output_tokens: (t.output ?? 0) + (t.reasoning ?? 0),
+        cache_read_input_tokens: t.cache?.read ?? 0,
+        cache_creation_input_tokens: t.cache?.write ?? 0,
+        reasoning_tokens: t.reasoning ?? 0,
+      },
+      costUSD: typeof step.cost === "number" ? step.cost : 0,
+      stepReason: step.finish ?? "",
+    })
   }
-  flushAssistant(s, m, force)
 }
 
 function flushAll(s, force) {
-  for (const m of s.messages.values()) flushMessage(s, m, force)
+  for (const step of s.steps.values()) flushStep(s, step, force)
+  if (force) s.steps.clear()
+}
+
+function contentText(content) {
+  if (!Array.isArray(content)) return typeof content === "string" ? content : ""
+  return content.map((c) => (c?.type === "text" ? (c.text ?? "") : `[${c?.type ?? "content"}]`)).join("\n")
+}
+
+function stepFromMessage(m) {
+  const step = newStep(m.id, m.model, m.time?.created)
+  const counts = { text: 0, reasoning: 0 }
+  for (const c of m.content ?? []) {
+    if (c?.type === "text" || c?.type === "reasoning") {
+      const it = itemOf(step, `${c.type}-${counts[c.type]++}`, c.type)
+      it.text = c.text ?? ""
+      it.final = true
+      if (c.type === "reasoning") {
+        it.start = c.time?.created ?? null
+        it.end = c.time?.completed ?? null
+      }
+    } else if (c?.type === "tool") {
+      const it = itemOf(step, `tool-${c.id}`, "tool")
+      it.callID = c.id
+      it.name = c.name
+      it.input = c.state?.input && typeof c.state.input === "object" ? c.state.input : {}
+      it.start = c.time?.ran ?? c.time?.created ?? null
+      it.end = c.time?.completed ?? null
+      const st = c.state?.status
+      it.final = st === "completed" || st === "error"
+      it.isErr = st === "error"
+      it.result = st === "error" ? String(c.state?.error?.message ?? "error") : contentText(c.state?.content)
+    }
+  }
+  step.finish = m.finish ?? null
+  step.tokens = m.tokens ?? null
+  step.cost = m.cost ?? 0
+  step.error = m.error ?? null
+  step.completed = m.time?.completed ?? null
+  step.files = m.snapshot?.files ?? []
+  step.hash = m.snapshot?.end ?? ""
+  step.done = m.time?.completed != null
+  step.ended = step.done && step.tokens != null
+  return step
+}
+
+function emitHistory(s, messages, all) {
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i]
+    if (!m?.id) continue
+    switch (m.type) {
+      case "user":
+        if (m.time?.created <= s.lastTs) break
+        writeUser(s, m.id, m.time?.created, promptText(m.text, m.files), false)
+        break
+      case "synthetic":
+        if (m.time?.created <= s.lastTs) break
+        writeUser(s, m.id, m.time?.created, m.text ?? "", true)
+        break
+      case "assistant": {
+        if (s.steps.has(m.id)) return
+        if (m.time?.completed != null && m.time.completed <= s.lastTs) break
+        const step = stepFromMessage(m)
+        if (!step.done && !all) {
+          s.steps.set(m.id, step)
+          flushStep(s, step)
+          return
+        }
+        flushStep(s, step, true)
+        break
+      }
+    }
+  }
 }
 
 function hookPayload(s) {
-  return JSON.stringify({ session_id: s.id, agent: AGENT, cwd: s.info?.directory ?? s.directory ?? process.cwd() })
+  return JSON.stringify({ session_id: s.id, agent: AGENT, cwd: cwdOf(s) })
 }
 
 function hookArgs(which) {
@@ -355,7 +472,7 @@ function runHook(which, s) {
 }
 
 function hookStart(s) {
-  if (s.hooked) return
+  if (s.hooked || !s.info || s.info.parentID) return
   s.hooked = true
   try {
     runHook("start", s)
@@ -392,13 +509,12 @@ function awaitDaemonExit(deadlineMs) {
   while (fs.existsSync(pid) && Date.now() < until) sleepSync(50)
 }
 
-let closing = false
-
 function shutdown() {
-  closing = true
+  state.closing = true
   let ended = false
   for (const s of sessions.values()) {
     try {
+      drain(s)
       flushAll(s, true)
     } catch (err) {
       log(`flush ${s.id}: ${err?.message ?? err}`)
@@ -410,29 +526,204 @@ function shutdown() {
   if (ended) awaitDaemonExit(3000)
 }
 
-async function loadMessages(s, client, all) {
-  const res = await client.session.messages({ path: { id: s.id } })
-  if (res?.error) throw new Error(res.error?.data?.message ?? JSON.stringify(res.error))
-  const rows = res?.data ?? (Array.isArray(res) ? res : [])
-  for (let i = 0; i < rows.length; i++) {
-    const { info, parts } = rows[i]
-    if (!info) continue
-    const m = ensureMessage(s, info.id)
-    m.info ??= info
-    for (const p of parts ?? []) if (!m.parts.has(p.id)) m.parts.set(p.id, p)
-    const force = all || (info.role === "user" ? i < rows.length - 1 : info.time?.completed != null)
-    flushMessage(s, m, force)
+function drain(s) {
+  const queued = s.queue.splice(0)
+  s.loading = null
+  for (const e of queued) apply(s, e)
+}
+
+async function catchUp(s, ctx) {
+  try {
+    const row = await ctx.session.get({ sessionID: s.id })
+    if (row?.id) {
+      s.info = infoFromSession(row, ctx.app?.version)
+      if (s.written.size) flushMeta(s)
+    }
+  } catch (err) {
+    log(`session.get ${s.id}: ${err?.message ?? err}`)
+  }
+  if (!s.info) s.info = { id: s.id, directory: s.directory, version: ctx.app?.version ?? "" }
+  try {
+    const messages = await ctx.session.context({ sessionID: s.id })
+    if (s.loading) emitHistory(s, Array.isArray(messages) ? messages : [], false)
+  } catch (err) {
+    log(`session.context ${s.id}: ${err?.message ?? err}`)
   }
 }
 
-async function backfill(s, client) {
-  if (s.backfilled || !client?.session?.messages) return
-  s.backfilled = true
-  try {
-    await loadMessages(s, client, false)
-  } catch (err) {
-    log(`backfill ${s.id}: ${err?.message ?? err}`)
+function track(s, ctx) {
+  if (s.info || s.loading) return
+  if (!ctx?.session?.get) {
+    s.info = { id: s.id, directory: s.directory, version: ctx?.app?.version ?? "" }
+    hookStart(s)
+    return
   }
+  s.loading = catchUp(s, ctx)
+    .catch((err) => log(`catch-up ${s.id}: ${err?.stack ?? err}`))
+    .finally(() => {
+      if (!sessions.has(s.id) || !s.loading) return
+      try {
+        hookStart(s)
+        drain(s)
+      } catch (err) {
+        log(`drain ${s.id}: ${err?.stack ?? err}`)
+      }
+    })
+}
+
+function stepOf(s, d, created) {
+  const id = d.assistantMessageID
+  if (!id) return null
+  let step = s.steps.get(id)
+  if (!step) {
+    step = newStep(id, null, created)
+    s.steps.set(id, step)
+  }
+  return step
+}
+
+function apply(s, e) {
+  const d = e.data ?? {}
+  if (TERMINAL.has(e.type)) {
+    flushAll(s, true)
+    return
+  }
+  switch (e.type) {
+    case "session.renamed":
+      if (s.info) {
+        s.info.title = d.title
+        s.info.updated = e.created
+        if (s.written.size) flushMeta(s)
+      }
+      return
+    case "session.inbox.enqueued":
+      s.inbox.set(d.inboxID, d.item)
+      return
+    case "session.inbox.cancelled":
+      s.inbox.delete(d.inboxID)
+      return
+    case "session.inbox.delivered": {
+      const item = s.inbox.get(d.inboxID)
+      s.inbox.delete(d.inboxID)
+      if (item?.type === "user") writeUser(s, d.inboxID, e.created, promptText(item.payload?.text, item.payload?.files), false)
+      else if (item?.type === "synthetic") writeUser(s, d.inboxID, e.created, item.payload?.text ?? "", true)
+      return
+    }
+    case "session.synthetic":
+      writeUser(s, e.id.replace(/^evt_/, "msg_"), e.created, d.text ?? "", true)
+      return
+    case "session.step.started": {
+      const step = stepOf(s, d, d.started ?? e.created)
+      step.model = modelOf(d.model)
+      step.created = d.started ?? e.created
+      flushModel(s, step)
+      return
+    }
+    case "session.text.started":
+    case "session.reasoning.started": {
+      const kind = e.type === "session.text.started" ? "text" : "reasoning"
+      const step = stepOf(s, d, e.created)
+      const it = itemOf(step, `${kind}-${d.ordinal}`, kind)
+      if (kind === "reasoning") it.start = e.created
+      return
+    }
+    case "session.text.ended":
+    case "session.reasoning.ended": {
+      const kind = e.type === "session.text.ended" ? "text" : "reasoning"
+      const step = stepOf(s, d, e.created)
+      const it = itemOf(step, `${kind}-${d.ordinal}`, kind)
+      it.text = d.text ?? ""
+      it.final = true
+      if (kind === "reasoning") {
+        it.start ??= e.created
+        it.end = e.created
+      }
+      flushStep(s, step)
+      return
+    }
+    case "session.tool.input.started": {
+      const step = stepOf(s, d, e.created)
+      const it = itemOf(step, `tool-${d.id}`, "tool")
+      it.callID = d.id
+      it.name = d.name ?? it.name
+      return
+    }
+    case "session.tool.called": {
+      const step = stepOf(s, d, e.created)
+      const it = itemOf(step, `tool-${d.id}`, "tool")
+      it.callID = d.id
+      it.input = d.input && typeof d.input === "object" ? d.input : {}
+      it.start = e.created
+      return
+    }
+    case "session.tool.success":
+    case "session.tool.failed": {
+      const step = stepOf(s, d, e.created)
+      const it = itemOf(step, `tool-${d.id}`, "tool")
+      it.callID = d.id
+      it.final = true
+      it.end = e.created
+      it.start ??= e.created
+      it.isErr = e.type === "session.tool.failed"
+      it.result = it.isErr ? String(d.error?.message ?? "error") : contentText(d.content)
+      flushStep(s, step)
+      return
+    }
+    case "session.step.ended":
+    case "session.step.failed": {
+      const step = stepOf(s, d, e.created)
+      step.done = true
+      step.ended = e.type === "session.step.ended" || d.tokens != null
+      step.completed = e.created
+      if (d.finish) step.finish = d.finish
+      if (d.tokens) step.tokens = d.tokens
+      if (typeof d.cost === "number") step.cost = d.cost
+      if (Array.isArray(d.files)) step.files = d.files
+      if (d.snapshot) step.hash = d.snapshot
+      if (e.type === "session.step.failed") step.error = d.error ?? { type: "UnknownError" }
+      flushStep(s, step)
+      s.steps.delete(step.id)
+      return
+    }
+  }
+}
+
+function handle(e, ctx) {
+  if (!e?.type || !firstSeen(e.id)) return
+  const d = e.data ?? {}
+  const sid = d.sessionID
+  if (!sid) return
+  const directory = e.location?.directory ?? ctx?.location?.directory
+  switch (e.type) {
+    case "session.created": {
+      const s = ensureSession(sid, { directory })
+      s.info = { id: sid, directory: d.location?.directory ?? directory, version: d.version ?? ctx?.app?.version ?? "", title: d.title, created: e.created }
+      if (d.parentID) s.info.parentID = d.parentID
+      if (s.loading) s.loading = null
+      if (s.written.size) flushMeta(s)
+      hookStart(s)
+      drain(s)
+      return
+    }
+    case "session.deleted": {
+      const s = sessions.get(sid)
+      if (!s) return
+      drain(s)
+      flushAll(s, true)
+      hookEnd(s)
+      sessions.delete(sid)
+      return
+    }
+  }
+  if (!e.type.startsWith("session.")) return
+  const s = ensureSession(sid, { directory })
+  if (!s.directory) s.directory = directory
+  track(s, ctx)
+  if (s.loading) {
+    s.queue.push(e)
+    return
+  }
+  apply(s, e)
 }
 
 function pause(ms) {
@@ -498,31 +789,25 @@ function liveSessions() {
   return ids
 }
 
-function unwrapList(res) {
-  if (res?.error) throw new Error(res.error?.data?.message ?? JSON.stringify(res.error))
-  const rows = Array.isArray(res?.data) ? res.data : Array.isArray(res) ? res : []
-  const header = res?.response?.headers?.get?.("x-next-cursor")
-  const next = header != null && header !== "" ? Number(header) : null
-  return { rows, next: Number.isFinite(next) ? next : null }
+function anchorCursor(anchor) {
+  if (!anchor?.id || typeof anchor.time !== "number") return undefined
+  return Buffer.from(JSON.stringify({ anchor: { id: anchor.id, time: anchor.time, direction: "next" } })).toString("base64url")
 }
 
-function listGlobal(client, { start, cursor }) {
-  const query = { directory: "", archived: true, limit: BACKFILL_PAGE }
-  if (start) query.start = start
+async function listPage(ctx, anchor) {
+  const query = { limit: BACKFILL_PAGE }
+  const cursor = anchorCursor(anchor)
   if (cursor) query.cursor = cursor
-  return client.session.list({ url: "/experimental/session", query }).then(unwrapList)
+  const res = await ctx.session.list(query)
+  return Array.isArray(res?.data) ? res.data : Array.isArray(res) ? res : []
 }
 
-function listProject(client, { start }) {
-  const query = { scope: "project", limit: 1000 }
-  if (start) query.start = start
-  return client.session.list({ query }).then((res) => ({ rows: unwrapList(res).rows, next: null }))
-}
-
-async function backfillSession(row, client, stats) {
-  const s = newSession(row.id, { info: row, directory: row.directory })
+async function backfillSession(row, ctx, stats) {
+  const s = newSession(row.id, { info: infoFromSession(row, ctx.app?.version) })
   const before = s.written.size
-  await loadMessages(s, client, true)
+  s.metaOpts = { git: false }
+  const messages = await ctx.session.context({ sessionID: row.id })
+  emitHistory(s, Array.isArray(messages) ? messages : [], true)
   const added = s.written.size - before
   stats.sessions++
   if (added) {
@@ -531,18 +816,15 @@ async function backfillSession(row, client, stats) {
   }
 }
 
-let backfillStarted = false
-let backfillRun = null
-
 function backfillStamp(run, complete) {
-  const stamp = { updated: complete ? run.newest : run.updated, scope: run.scope, at: new Date().toISOString() }
+  const stamp = { updated: complete ? run.newest : run.updated, scope: "global", at: new Date().toISOString() }
   if (!complete) stamp.pending = { floor: run.floor ?? null, cursor: run.done ?? run.cursor ?? null, newest: run.newest }
   return stamp
 }
 
 function backfillSuspend() {
-  const run = backfillRun
-  backfillRun = null
+  const run = state.backfillRun
+  state.backfillRun = null
   if (run) {
     try {
       writeJSON(STAMP, backfillStamp(run, false))
@@ -551,10 +833,9 @@ function backfillSuspend() {
   unlockBackfill()
 }
 
-async function backfillHistory(client) {
-  if (backfillStarted || BACKFILL === "off") return
-  backfillStarted = true
-  if (!client?.session?.list || !client?.session?.messages) return
+async function backfillHistory(ctx) {
+  if (BACKFILL === "off") return
+  if (!ctx?.session?.list || !ctx?.session?.context) return
   if (!lockBackfill()) {
     log("backfill: skipped, another process holds the lock")
     return
@@ -562,158 +843,107 @@ async function backfillHistory(client) {
   const t0 = Date.now()
   const stamp = (BACKFILL === "all" ? null : readJSON(STAMP)) ?? {}
   const pending = stamp.pending
+  const validCursor = (c) => (c && typeof c === "object" && c.id && typeof c.time === "number" ? c : undefined)
   const run = {
     updated: stamp.updated ?? 0,
     floor: pending ? (pending.floor ?? undefined) : stamp.updated || undefined,
-    cursor: pending ? (pending.cursor ?? undefined) : undefined,
+    cursor: pending ? validCursor(pending.cursor) : undefined,
     newest: pending ? (pending.newest ?? 0) : (stamp.updated ?? 0),
     done: undefined,
-    scope: "global",
   }
-  backfillRun = run
+  state.backfillRun = run
   const live = liveSessions()
   const stats = { sessions: 0, skipped: 0, files: 0, lines: 0, errors: 0 }
   let complete = false
   let cut = false
   try {
-    while (!closing) {
-      let page
-      try {
-        page = await listGlobal(client, { start: run.floor, cursor: run.cursor })
-      } catch (err) {
-        if (run.cursor != null || run.scope !== "global") throw err
-        log(`backfill: global listing failed (${err?.message ?? err}); falling back to this project's sessions`)
-        run.scope = "project"
-        page = await listProject(client, { start: run.floor })
-      }
-      for (const row of page.rows) {
-        if (closing || Date.now() - t0 > BACKFILL_BUDGET_MS) {
+    while (!state.closing) {
+      const rows = await listPage(ctx, run.cursor)
+      for (const row of rows) {
+        if (state.closing || Date.now() - t0 > BACKFILL_BUDGET_MS) {
           cut = true
           break
         }
         if (!row?.id) continue
         const updated = row.time?.updated ?? 0
+        if (run.floor && updated < run.floor) {
+          complete = true
+          break
+        }
         if (updated > run.newest) run.newest = updated
         if (live.has(row.id) || sessions.has(row.id)) {
           stats.skipped++
         } else {
           try {
-            await backfillSession(row, client, stats)
+            await backfillSession(row, ctx, stats)
           } catch (err) {
             stats.errors++
             log(`backfill ${row.id}: ${err?.message ?? err}`)
           }
           await pause(BACKFILL_GAP_MS)
         }
-        run.done = updated
+        run.done = { id: row.id, time: updated }
       }
-      if (cut || closing) break
-      if (run.scope !== "global" || page.next == null || page.rows.length === 0) {
+      if (complete || cut || state.closing) break
+      if (rows.length < BACKFILL_PAGE) {
         complete = true
         break
       }
-      run.cursor = page.next
+      run.cursor = run.done
       await pause(BACKFILL_GAP_MS)
     }
-    if (backfillRun === run) {
+    if (state.backfillRun === run) {
       writeJSON(STAMP, backfillStamp(run, complete))
-      backfillRun = null
+      state.backfillRun = null
     }
     const ms = Date.now() - t0
     const tail = complete ? "complete" : `cut after ${ms} ms, resumes next launch`
-    log(`backfill: scope=${run.scope} sessions=${stats.sessions} skipped=${stats.skipped} files=${stats.files} lines=${stats.lines} errors=${stats.errors} ms=${ms} ${tail}`)
+    log(`backfill: scope=global sessions=${stats.sessions} skipped=${stats.skipped} files=${stats.files} lines=${stats.lines} errors=${stats.errors} ms=${ms} ${tail}`)
   } catch (err) {
     log(`backfill: ${err?.stack ?? err}`)
   } finally {
-    if (backfillRun === run) backfillRun = null
+    if (state.backfillRun === run) state.backfillRun = null
     unlockBackfill()
   }
 }
 
-function handle(event, client, directory) {
-  const props = event?.properties ?? {}
-  switch (event?.type) {
-    case "session.created": {
-      const info = props.info
-      if (!info?.id) return
-      const s = ensureSession(info.id, { created: true, info, directory })
-      if (!info.parentID) hookStart(s)
-      return
+export function setup(ctx) {
+  state.closing = false
+  if (!state.exitHooked) {
+    state.exitHooked = true
+    process.once("exit", shutdown)
+  }
+  if (!state.backfillStarted && BACKFILL !== "off") {
+    state.backfillStarted = true
+    const timer = setTimeout(() => {
+      backfillHistory(ctx).catch((err) => log(`backfill: ${err?.stack ?? err}`))
+    }, BACKFILL_DELAY_MS)
+    timer.unref?.()
+  }
+  const abort = new AbortController()
+  const loop = (async () => {
+    for await (const event of ctx.event.subscribe({ signal: abort.signal })) {
+      try {
+        handle(event, ctx)
+      } catch (err) {
+        log(`event ${event?.type}: ${err?.stack ?? err}`)
+      }
     }
-    case "session.updated": {
-      const info = props.info
-      if (!info?.id) return
-      const s = ensureSession(info.id, { info, directory })
-      if (!info.parentID) hookStart(s)
-      if (s.resumed) void backfill(s, client)
-      return
-    }
-    case "message.updated": {
-      const info = props.info
-      if (!info?.sessionID || !info.id) return
-      const s = ensureSession(info.sessionID, { directory })
-      hookStart(s)
-      if (s.resumed) void backfill(s, client)
-      const m = ensureMessage(s, info.id)
-      m.info = info
-      if (info.role === "assistant" && info.time?.completed != null) m.done = true
-      flushMessage(s, m)
-      return
-    }
-    case "message.part.updated": {
-      const part = props.part
-      if (!part?.sessionID || !part.messageID || !part.id) return
-      const s = ensureSession(part.sessionID, { directory })
-      const m = ensureMessage(s, part.messageID)
-      m.parts.set(part.id, part)
-      if (m.info?.role === "assistant") flushMessage(s, m)
-      return
-    }
-    case "session.idle": {
-      const s = sessions.get(props.sessionID)
-      if (!s) return
-      for (const m of s.messages.values()) m.done = true
-      flushAll(s, true)
-      if (s.resumed) void backfill(s, client)
-      return
-    }
-    case "session.deleted": {
-      const id = props.info?.id
-      const s = id && sessions.get(id)
-      if (!s) return
-      flushAll(s, true)
-      hookEnd(s)
-      sessions.delete(id)
-      return
+  })().catch((err) => {
+    if (!abort.signal.aborted) log(`subscribe: ${err?.stack ?? err}`)
+  })
+  return async () => {
+    abort.abort()
+    await Promise.race([loop, pause(1000)])
+    try {
+      for (const s of sessions.values()) {
+        drain(s)
+        flushAll(s, false)
+      }
+    } catch (err) {
+      log(`cleanup: ${err?.message ?? err}`)
     }
   }
 }
 
-export const CccpPlugin = async ({ client, directory }) => {
-  if (!exitHooked) {
-    exitHooked = true
-    process.once("exit", shutdown)
-  }
-  if (!backfillStarted && BACKFILL !== "off") {
-    const timer = setTimeout(() => {
-      backfillHistory(client).catch((err) => log(`backfill: ${err?.stack ?? err}`))
-    }, BACKFILL_DELAY_MS)
-    timer.unref?.()
-  }
-  return {
-    event: async ({ event }) => {
-      try {
-        handle(event, client, directory)
-      } catch (err) {
-        log(`event ${event?.type}: ${err?.stack ?? err}`)
-      }
-    },
-    dispose: async () => {
-      try {
-        shutdown()
-      } catch (err) {
-        log(`dispose: ${err?.message ?? err}`)
-      }
-    },
-  }
-}
+export default { id: "cccp", setup }

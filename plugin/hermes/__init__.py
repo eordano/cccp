@@ -31,8 +31,10 @@ HOOK_TIMEOUT_SECONDS = 10
 MAX_BLOCK_CHARS = 512 * 1024
 MAX_SESSIONS = 256
 
-BACKFILL_STAMP = ".backfill.json"
-BACKFILL_LOCK = ".backfill.lock"
+CCCP_DIR = "cccp"
+BACKFILL_STAMP = "backfill.json"
+BACKFILL_LOCK = "backfill.lock"
+LEGACY_STAMP = TRANSCRIPTS_DIR + "/.backfill.json"
 BACKFILL_DELAY_SECONDS = 5.0
 BACKFILL_BUDGET_SECONDS = 20.0
 BACKFILL_ACTIVE_GRACE_SECONDS = 15 * 60
@@ -195,6 +197,44 @@ def _line(kind: str, message: Optional[Dict[str, Any]], *, session_id: str, cwd:
     return line
 
 
+def _git_info(cwd: str) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    git = shutil.which("git")
+    if not git or not cwd or not os.path.isdir(cwd):
+        return out
+    for key, args in (("gitBranch", ["rev-parse", "--abbrev-ref", "HEAD"]), ("gitCommit", ["rev-parse", "HEAD"])):
+        try:
+            r = subprocess.run([git, "-C", cwd, *args], capture_output=True, text=True, timeout=2)
+        except Exception:
+            return out
+        value = (r.stdout or "").strip()
+        if r.returncode != 0 or not value:
+            return out
+        if value != "HEAD":
+            out[key] = value
+    return out
+
+
+def _user() -> str:
+    try:
+        import getpass
+        return getpass.getuser()
+    except Exception:
+        return os.environ.get("USER", "")
+
+
+def _meta_extra(cwd: str, model: str, source: str = "", parent: str = "", git: bool = True) -> Dict[str, Any]:
+    extra: Dict[str, Any] = {"agentSource": source or "", "model": model or ""}
+    if parent:
+        extra["parentSessionId"] = parent
+    user = _user()
+    if user:
+        extra["user"] = user
+    if git:
+        extra.update(_git_info(cwd))
+    return extra
+
+
 def _write_lines(path: Path, lines: Iterable[Dict[str, Any]]) -> int:
     body = [json.dumps(line, ensure_ascii=False, default=str) for line in lines]
     if not body:
@@ -213,6 +253,9 @@ class _Session:
         self.last_uuid: Optional[str] = None
         self.seen: set = set()
         self.started = False
+        self.meta_written = False
+        self.source = ""
+        self.parent = ""
         self.lock = threading.Lock()
         self.path = _transcript_path(_hermes_home(), session_id)
 
@@ -226,6 +269,9 @@ class _Session:
 
     def _write(self, records: List[Tuple[Any, ...]], timestamp: Optional[str] = None) -> None:
         lines = []
+        if not self.meta_written:
+            self.meta_written = True
+            records = [("session-meta", None, _meta_extra(self.cwd, self.model, self.source, self.parent))] + list(records)
         for rec in records:
             kind, message = rec[0], rec[1]
             extra = rec[2] if len(rec) > 2 else None
@@ -269,7 +315,7 @@ def _cccp(sub: str, session_id: str, background: bool = False) -> None:
         run()
 
 
-def _session(session_id: Any, model: str = "") -> Optional[_Session]:
+def _session(session_id: Any, model: str = "", source: Any = None, parent: Any = None) -> Optional[_Session]:
     sid = str(session_id or "").strip()
     if not sid:
         return None
@@ -280,6 +326,10 @@ def _session(session_id: Any, model: str = "") -> Optional[_Session]:
                 _sessions.pop(next(iter(_sessions)))
             s = _Session(sid)
             _sessions[sid] = s
+        if source and not s.source:
+            s.source = str(source)
+        if parent and not s.parent and str(parent) != sid:
+            s.parent = str(parent)
         start = not s.started
         s.started = True
     if start:
@@ -300,8 +350,8 @@ def _failsafe(fn):
 
 
 @_failsafe
-def _on_session_start(session_id=None, model="", **_):
-    _session(session_id, model or "")
+def _on_session_start(session_id=None, model="", platform=None, source=None, parent_session_id=None, **_):
+    _session(session_id, model or "", source=platform or source, parent=parent_session_id)
 
 
 @_failsafe
@@ -372,7 +422,8 @@ def _on_session_finalize(session_id=None, **_):
 
 _CONTENT_JSON_PREFIX = "\x00json:"
 _SESSION_COLS = ("id", "started_at", "ended_at", "cwd", "model", "message_count", "input_tokens", "output_tokens",
-                 "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "estimated_cost_usd", "actual_cost_usd")
+                 "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "estimated_cost_usd", "actual_cost_usd",
+                 "source", "parent_session_id")
 _MESSAGE_COLS = ("id", "role", "content", "tool_call_id", "tool_calls", "tool_name", "timestamp",
                  "reasoning", "reasoning_content", "active", "compacted")
 
@@ -557,9 +608,12 @@ def _backfill_lines(session: Dict[str, Any], msgs: List[Dict[str, Any]],
         parent = line["uuid"]
         out.append(line)
 
+    stamps = [float(t) for t in (session.get("started_at"), msgs[0].get("timestamp") if msgs else None) if t]
+    first_ts = min(stamps) if stamps else None
+    emit("session-meta", None, "", "meta", first_ts,
+         _meta_extra(cwd, model, str(session.get("source") or ""), str(session.get("parent_session_id") or ""), git=False))
     if model:
-        stamps = [float(t) for t in (session.get("started_at"), msgs[0].get("timestamp") if msgs else None) if t]
-        emit("model-change", None, "", "model", min(stamps) if stamps else None, {"model": model, "effort": ""})
+        emit("model-change", None, "", "model", first_ts, {"model": model, "effort": ""})
 
     def emit_result(tool_row: Dict[str, Any], tid: str) -> None:
         decoded = _decode_content(tool_row.get("content"))
@@ -635,9 +689,28 @@ def _load_stamp(path: Path) -> Dict[str, Any]:
 def _save_stamp(path: Path, stamp: Dict[str, Any]) -> None:
     stamp["version"] = 1
     stamp["updated"] = _now()
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(stamp, indent=1, sort_keys=True), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _stamp_path(home: Path) -> Path:
+    return home / CCCP_DIR / BACKFILL_STAMP
+
+
+def _migrate_stamp(home: Path) -> None:
+    new, old = _stamp_path(home), home / LEGACY_STAMP
+    if new.exists() or not old.is_file():
+        return
+    stamp = _load_stamp(old)
+    if stamp["sessions"]:
+        _save_stamp(new, stamp)
+
+
+def _read_stamp(home: Path) -> Dict[str, Any]:
+    new = _stamp_path(home)
+    return _load_stamp(new if new.exists() else home / LEGACY_STAMP)
 
 
 def _file_uuids(path: Path) -> Tuple[set, Optional[str]]:
@@ -688,12 +761,12 @@ def backfill(home: Optional[Path] = None, budget: float = BACKFILL_BUDGET_SECOND
     t0 = time.monotonic()
     stats: Dict[str, Any] = {"home": str(home), "sessions": 0, "written": 0, "lines": 0, "skipped": 0,
                              "active": 0, "empty": 0, "foreign": 0, "resume": False, "seconds": 0.0, "api": False}
-    tdir = home / TRANSCRIPTS_DIR
-    with _Lock(tdir / BACKFILL_LOCK) as locked:
+    with _Lock(home / CCCP_DIR / BACKFILL_LOCK) as locked:
         if not locked:
             stats["skipped_locked"] = True
             return stats
-        stamp_path = tdir / BACKFILL_STAMP
+        _migrate_stamp(home)
+        stamp_path = _stamp_path(home)
         stamp = _load_stamp(stamp_path)
         entries: Dict[str, Any] = stamp["sessions"]
         store = _Store(home, use_api=use_api)
@@ -809,7 +882,7 @@ def _slash(raw_args: str = "") -> Optional[str]:
                     f"{stats['foreign']} live-owned, {stats['seconds']}s"
                     + (" -- budget hit, run again to continue" if stats["resume"] else ""))
         if cmd == "status":
-            stamp = _load_stamp(_hermes_home() / TRANSCRIPTS_DIR / BACKFILL_STAMP)
+            stamp = _read_stamp(_hermes_home())
             done = [k for k, v in stamp["sessions"].items() if not v.get("skip")]
             skipped = len(stamp["sessions"]) - len(done)
             return (f"cccp backfill: {len(done)} sessions backfilled, {skipped} live-owned, "

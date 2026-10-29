@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/eordano/cccp/internal/store"
+	"github.com/eordano/cccp/internal/syncclass"
 )
 
 type LogAppendEntry struct {
@@ -129,6 +130,9 @@ func (s *Server) handleLogSince(w http.ResponseWriter, r *http.Request) {
 	enc := json.NewEncoder(w)
 	var sent int
 	err := s.Store.LogLinesSince(r.Context(), since, func(l store.LogLine) bool {
+		if syncclass.Classify(l.Path, 0) != syncclass.ClassTranscript {
+			return true
+		}
 		if enc.Encode(logSinceLine{
 			Path:          l.Path,
 			Line:          string(l.Contents),

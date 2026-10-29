@@ -40,6 +40,9 @@ root URL behind cookie authentication.
 .B push
 Walk the allowlist, upload blobs and append log lines, then tombstone
 paths that were previously pushed but have since disappeared from disk.
+A path that is no longer synced (dropped from the allowlist, or excluded
+by the agent profile) is forgotten, never tombstoned: its versions stay on
+the server.
 .IP
 During push, the built-in secret scanner (cheka) examines each file for
 API keys, tokens, passwords, private keys, connection strings, and other
@@ -57,6 +60,12 @@ and the push proceeds; blob files with secrets still fail.
 .B "pull [--full]"
 Incremental pull: write only blob files whose content differs from local,
 append log lines newer than the saved cursor (deduped against local).
+Only transcript paths and human-approved versions of knowledge paths are
+written; privileged paths (hooks, settings, plugin and MCP configuration,
+codex rules, any script or executable) are never applied, no pulled file
+keeps an executable bit, a symlink is never replaced, and a local edit of a
+knowledge file is kept over the approved version. See
+.BR "REVIEW GATE" .
 With
 .BR --full ,
 rewrite every blob from the server snapshot and replay all log lines
@@ -101,12 +110,72 @@ logs from the given directory (default
 .IR $HOME/.claude/projects )
 and serves a timeline UI on the configured port (default 9123).
 .TP
+.B "review list [--all] | show PATH VERSION | approve PATH VERSION [--note TEXT] | reject PATH VERSION [--note TEXT]"
+Drive the knowledge review queue (requires the full token). Approving an
+older version rolls back to it; rejecting a version also withdraws an
+earlier approval of it. See
+.BR "REVIEW GATE" .
+.TP
+.B "index rebuild [--fresh] | update | status"
+Maintain the server's session index directly on the store file
+.RI ( --db ).
+.B rebuild
+folds every log path up to the current head and then the lines that
+arrived meanwhile; it resumes a rebuild in progress unless
+.B --fresh
+is given, and is safe to run next to a live
+.BR "cccp serve" ,
+which follows the index itself (unless started with
+.BR --index=false ).
+The index is derived data: the raw log is
+never rewritten.
+.TP
 .B host-id
 Print this host's persistent UUID (generated on first run, stored under
 .IR $dir/cccp/host_id ).
 .TP
 .B "help, -h, --help"
 Print the built-in usage summary.
+.SH REVIEW GATE
+Agent-written state is untrusted input. Every synced path is
+.B privileged
+(archived on push, never applied on pull; its source of truth is the
+repository or home-manager),
+.B knowledge
+(memory,
+.IR CLAUDE.md ,
+.IR AGENTS.md ,
+.IR SOUL.md ,
+and the prose of skills, commands and agents: applied by other hosts only
+once a human approves that version), or
+.B transcript
+(sessions, history, plans, file history: synced as before). An
+unclassified path is privileged. Knowledge in an agent's own space
+.RI ( agent/PROFILE-SPACE/ )
+is archived like privileged files and never queued for review: only the
+home that writes a space pulls it. Each version records its host, agent and
+the pushing host's active session ids. Review in the browser at
+.I /review
+or with
+.BR "cccp review" .
+.B "serve --review-precheck CMD"
+runs CMD on each proposed knowledge version (content on stdin;
+.BR CCCP_PATH ,
+.BR CCCP_VERSION ,
+.BR CCCP_SHA ,
+.BR CCCP_HOST_ID ,
+.B CCCP_AGENT
+in the environment) and records its verdict; it never approves.
+.PP
+The first time a gate-aware server opens a store it records
+.BR gate_since .
+Versions ingested before it are
+.BR legacy :
+never served to gate-aware clients unless approved. Clients that do not
+send
+.B "X-Cccp-Gate: 1"
+receive transcripts plus every other path frozen at
+.BR gate_since .
 .SH CONFIGURATION
 Settings resolve from four layers, later wins:
 .IP "1." 4
@@ -154,6 +223,17 @@ Picks the default
 (the agent's own state directory) and allowlist. Non-claude agents ship
 every path under the wire prefix
 .IR agent/NAME/ .
+A non-claude
+.I NAME
+may carry a space of its own after a dash,
+.I PROFILE-SPACE
+(lowercase letters, digits and
+.BR -_. ),
+for example
+.BR hermes-buzz-fizz :
+the hermes profile's directory, allowlist, classes and converter, under
+.IR agent/hermes-buzz-fizz/ ,
+so several homes of one agent stop sharing (and overwriting) one space.
 Env:
 .BR CCCP_AGENT ;
 config key
@@ -172,6 +252,15 @@ Server base URL, e.g.
 Env:
 .BR CCCP_URL .
 .TP
+.BI "--token-file " PATH
+Read the bearer token from
+.I PATH
+when no token is set in any layer (config key
+.BR token_file ,
+environment
+.BR CCCP_TOKEN_FILE ).
+Keep it outside the agent's directory.
+.TP
 .BI "--token " TOKEN
 Bearer token. Required by
 .B serve
@@ -179,6 +268,29 @@ Bearer token. Required by
 .BR push / pull / watch
 (to present). Env:
 .BR CCCP_TOKEN .
+.TP
+.BI "--push-token " TOKEN
+(\c
+.B serve
+only) Optional second token accepted only on the push endpoints
+.RB ( "POST /ingest" ", " "PUT /blob/{sha}" ", " "POST /log/append" ", " "POST /sae/import" ).
+It can never read. Env:
+.BR CCCP_PUSH_TOKEN ;
+config key
+.BR push_token .
+.TP
+.BI "--read-token-file " PATH
+(\c
+.B serve
+only) Optional file holding a third, read-only token. It authorizes
+only GET and HEAD on an explicit allowlist of read routes (see
+.BR "HTTP API" )
+and gets 403 on every write, every review decision and the login form,
+so a holder can never approve the review gate. It must differ from the
+full and push tokens. Env:
+.BR CCCP_READ_TOKEN_FILE ;
+config key
+.BR read_token_file .
 .TP
 .BI "--addr, --address " ADDR
 Listen address for
@@ -269,6 +381,14 @@ Server URL for
 .TP
 .B CCCP_TOKEN
 Bearer token.
+.TP
+.B CCCP_PUSH_TOKEN
+Push-only token accepted by
+.BR serve .
+.TP
+.B CCCP_READ_TOKEN_FILE
+File holding the read-only token accepted by
+.BR serve .
 .TP
 .B CCCP_ADDR
 Listen address for
@@ -381,6 +501,29 @@ will consult
 when present (for echo suppression on
 .BR /events )
 but do not reject requests that omit it.
+.PP
+Three bearer tokens.
+The full token reaches everything.
+The push token
+.RB ( --push-token )
+reaches only the push endpoints and never reads.
+The read token
+.RB ( --read-token-file )
+reaches only GET and HEAD on this allowlist and gets 403 everywhere
+else, unlisted routes included:
+.BR /healthz ,
+.BR /current ,
+.BR /log/since ,
+.BR /events ,
+.BR /sae/feedback ,
+.BR /review/api/list ,
+.BR /review/api/show ,
+.BR /review ,
+.BR /review/show ,
+the pravda pages
+.RB ( / ", " /session/* ", " /subagent/* ", " /sessions ", " /sessions/* ", " /index-panel/* ", " /files ", " /files/* ", " /sae ", " /sae/features ", " /sae/feature/* ", " /sae/settings ", " /sae/session/* ", " /sae/daily/* ", " /sae/similar/* ", " /ws ", " /ws/live/* )
+and pravda's static assets.
+Only the full token can log in to pravda: the read token is bearer-only.
 .TP
 .B "POST /ingest"
 Submit a file manifest as NDJSON. Each line is an object with fields

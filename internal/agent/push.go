@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -63,7 +64,7 @@ func Push(ctx context.Context, c *Config, allowlist []string, chekaAllow int, ch
 	if allowlist == nil {
 		allowlist = c.DefaultAllowlist()
 	}
-	entries, skipped, err := Walk(c.Root, c.Prefix, allowlist)
+	entries, walkSkipped, err := Walk(c.Root, c.Prefix, allowlist)
 	if err != nil {
 		return nil, err
 	}
@@ -71,9 +72,22 @@ func Push(ctx context.Context, c *Config, allowlist []string, chekaAllow int, ch
 	if err != nil {
 		return nil, err
 	}
+	synced := func(wire string) bool {
+		rel, own := c.localRel(wire)
+		return own && covers(allowlist, rel) && !c.excluded(rel)
+	}
 
+	var skipped []string
+	for _, p := range walkSkipped {
+		if synced(p) {
+			skipped = append(skipped, p)
+		}
+	}
 	var blobs, logs []FileEntry
 	for _, e := range entries {
+		if !synced(e.RelPath) {
+			continue
+		}
 		if e.IsLog {
 			logs = append(logs, e)
 		} else {
@@ -94,6 +108,9 @@ func Push(ctx context.Context, c *Config, allowlist []string, chekaAllow int, ch
 	}
 	var deletions []manifestLine
 	for _, p := range state.KnownPushedBlobPaths {
+		if !synced(p) {
+			continue
+		}
 		if _, ok := currentBlobPaths[p]; !ok {
 			deletions = append(deletions, manifestLine{Path: p, SHA: ""})
 		}
@@ -279,6 +296,9 @@ func postIngest(ctx context.Context, c *Config, manifest []manifestLine) (*inges
 	}
 	c.AuthReq(req)
 	req.Header.Set("Content-Type", "application/x-ndjson")
+	if ids := activeSessions(c.Root); ids != "" {
+		req.Header.Set("X-Cccp-Sessions", ids)
+	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, err
@@ -293,6 +313,22 @@ func postIngest(ctx context.Context, c *Config, manifest []manifestLine) (*inges
 		return nil, err
 	}
 	return &ir, nil
+}
+
+func activeSessions(root string) string {
+	b, err := os.ReadFile(filepath.Join(root, "cccp", "sessions.json"))
+	if err != nil {
+		return ""
+	}
+	var ids []string
+	if json.Unmarshal(b, &ids) != nil {
+		return ""
+	}
+	out := strings.Join(ids, ",")
+	if len(out) > 1024 {
+		out = out[:1024]
+	}
+	return out
 }
 
 func putBlob(ctx context.Context, c *Config, absPath, sha string) error {

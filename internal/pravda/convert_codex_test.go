@@ -202,7 +202,7 @@ func TestCodexConvertShapes(t *testing.T) {
 	} else {
 		var in struct {
 			Questions []struct {
-				Header  string `json:"header"`
+				Header  string                   `json:"header"`
 				Options []struct{ Label string } `json:"options"`
 			} `json:"questions"`
 		}

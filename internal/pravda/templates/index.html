@@ -1,0 +1,59 @@
+{{ define "index-panel" }}
+{{ if .Missing }}
+<details class="env-panel index-panel"><summary><span class="env-title">Session record</span> <span class="env-summary">not indexed yet</span></summary></details>
+{{ else }}{{ with .Detail }}
+<details class="env-panel index-panel">
+  <summary><span class="env-title">Session record</span> <span class="env-summary">{{ .Session.ID }}{{ if .Session.HostName }} · {{ .Session.HostName }}{{ end }}{{ if .Session.User }} · {{ .Session.User }}{{ end }} · {{ .Session.Turns }} turns · {{ .Session.ToolCalls }} tool calls{{ if .Session.Errors }} · {{ .Session.Errors }} errors{{ end }}{{ if gt .Rollup.CostUSD 0.0 }} · {{ fmtUSD .Rollup.CostUSD }}{{ if .Rollup.Descendants }} with {{ .Rollup.Descendants }} sub-sessions{{ end }}{{ end }}{{ if .Background }} · {{ len .Background }} background files{{ end }}</span></summary>
+  <div class="env-grid">
+    <section><h4>Session</h4><ul>
+      <li>id <span class="mono">{{ .Session.ID }}</span></li>
+      {{ if .Session.SessionID }}{{ if ne .Session.SessionID .Session.ID }}<li>session id <span class="mono">{{ .Session.SessionID }}</span></li>{{ end }}{{ end }}
+      {{ if .StartedText }}<li>{{ .StartedText }} → {{ .EndedText }}</li>{{ end }}
+      {{ if .Session.CWD }}<li class="mono">{{ .Session.CWD }}</li>{{ end }}
+      {{ if or .Session.GitBranch .Session.GitCommit }}<li>⎇ {{ .Session.GitBranch }}{{ if .Session.GitCommit }} <span class="mono">{{ shortID .Session.GitCommit }}</span>{{ end }}</li>{{ end }}
+      {{ if .Session.Models }}<li>{{ range $i, $m := .Session.Models }}{{ if $i }}, {{ end }}{{ $m }}{{ end }}</li>{{ end }}
+      <li>{{ .Session.Requests }} model calls · {{ .Session.LineCount }} log lines</li>
+      {{ with .Parent }}<li><a href="/session/{{ .Path }}">↑ {{ if .Title }}{{ .Title }}{{ else }}{{ .ID }}{{ end }}</a></li>{{ end }}
+    </ul></section>
+    <section><h4>Tokens and cost</h4><div class="env-table-wrap"><table class="env-table">
+      <tr><th></th><th>in</th><th>out</th><th>cache rd</th><th>cache wr</th><th>cost</th></tr>
+      <tr><td>this session</td><td>{{ fmtTokens .Session.InputTokens }}</td><td>{{ fmtTokens .Session.OutputTokens }}</td><td>{{ fmtTokens .Session.CacheRead }}</td><td>{{ fmtTokens .Session.CacheCreation }}</td><td>{{ if gt .Session.CostUSD 0.0 }}{{ fmtUSD .Session.CostUSD }}{{ end }}</td></tr>
+      {{ if .Rollup.Descendants }}<tr class="env-total"><td>with {{ .Rollup.Descendants }} sub-sessions</td><td>{{ fmtTokens .Rollup.InputTokens }}</td><td>{{ fmtTokens .Rollup.OutputTokens }}</td><td>{{ fmtTokens .Rollup.CacheRead }}</td><td>{{ fmtTokens .Rollup.CacheCreation }}</td><td>{{ if gt .Rollup.CostUSD 0.0 }}{{ fmtUSD .Rollup.CostUSD }}{{ end }}</td></tr>{{ end }}
+    </table></div>{{ if not .Session.CostReported }}<div class="dim">cost only where the agent reported it</div>{{ end }}</section>
+    {{ if .Children }}<section class="env-wide"><h4>Sub-sessions · {{ len .Children }}</h4><ul>{{ range .Children }}<li><a href="/session/{{ .Path }}">{{ if .Title }}{{ .Title }}{{ else }}{{ .ID }}{{ end }}</a> <span class="dim">{{ .Source }} · {{ .ToolCalls }} tools{{ if gt .CostUSD 0.0 }} · {{ fmtUSD .CostUSD }}{{ end }}{{ with .Rollup }} · {{ fmtUSD .CostUSD }} incl. {{ .Descendants }} nested{{ end }}</span></li>{{ end }}</ul></section>{{ end }}
+  </div>
+  {{ if $.Groups }}<div class="env-grid"><section class="env-wide"><h4>Background at session start</h4><div class="env-table-wrap"><table class="env-table bg-table">
+    <tr><th>file</th><th>version</th><th>written</th><th>by host</th><th>loaded as</th></tr>
+    {{ range $.Groups }}<tr class="env-total"><td colspan="5">{{ .Kind }}</td></tr>{{ range .Files }}
+    <tr{{ if and (eq .Kind "skill") (not .Invoked) }} class="env-muted"{{ end }}><td>{{ if .Synced }}<a href="/files/{{ .Path }}">{{ .Name }}</a>{{ else }}{{ .Name }}{{ end }}{{ if .Invoked }} <span class="dim">invoked</span>{{ end }}</td><td class="mono">{{ if .Synced }}<a href="/files/{{ .Path }}?v={{ .Version }}">v{{ .Version }}</a> {{ .Short }}{{ else }}<span class="dim">not synced</span>{{ end }}</td><td>{{ .When }}</td><td>{{ .Host }}</td><td>{{ .LoadedAs }}</td></tr>{{ end }}{{ end }}
+  </table></div></section></div>{{ end }}
+</details>
+{{ end }}{{ end }}
+{{ end }}
+
+{{ define "files-main" }}
+<header class="header">
+  {{ template "sidebar-toggle" }}
+  <div class="header-session">
+    <div class="session-title">{{ if .History }}{{ .History.Kind }} · {{ .History.Name }}{{ else }}Memory, instructions and skills{{ end }}</div>
+    <div class="session-sub">{{ if .History }}<span class="fact mono">{{ .History.Path }}</span><span class="fact">{{ .History.Shown }} versions</span><a class="fact" href="/files">all background files</a>{{ else }}<span class="fact">synced files sessions start with</span>{{ end }}</div>
+  </div>
+</header>
+<div class="timeline-wrap"><div class="timeline">
+{{ with .History }}
+  {{ if .Content }}<section class="env-panel"><div class="env-grid"><section class="env-wide"><h4>v{{ .ViewV }} content</h4><pre class="json-pre selectable">{{ .Content }}</pre></section></div></section>{{ end }}
+  <section class="env-panel"><div class="env-grid"><section class="env-wide"><div class="env-table-wrap"><table class="env-table bg-table">
+    <tr><th>version</th><th>review</th><th>written</th><th>host</th><th>written by</th><th>sessions started with it</th></tr>
+    {{ range .Versions }}<tr>
+      <td class="mono">{{ if .Deleted }}deleted{{ else }}<a href="?v={{ .Version }}">v{{ .Version }}</a> {{ .Short }}{{ end }}</td>
+      <td>{{ .Review }}</td>
+      <td>{{ .When }}</td><td>{{ .Host }}</td>
+      <td>{{ range .WrittenBy }}<div><a href="/session/{{ .Path }}">{{ if .Title }}{{ .Title }}{{ else }}{{ .ID }}{{ end }}</a> <span class="dim">{{ if .Tool }}{{ .Tool }} · {{ end }}{{ .Match }}</span></div>{{ else }}<span class="dim">no session matched (pull, manual edit or another agent)</span>{{ end }}</td>
+      <td>{{ .RanWith }}{{ if .Sessions }}<details><summary class="dim">show</summary>{{ range .Sessions }}<div><a href="/session/{{ .Path }}">{{ if .Title }}{{ .Title }}{{ else }}{{ .ID }}{{ end }}</a> <span class="dim">{{ .Host }} · {{ .When }}</span></div>{{ end }}</details>{{ end }}</td>
+    </tr>{{ end }}
+  </table></div>{{ if .Before }}<div class="dim">{{ .Before }} sessions started before the first synced version.</div>{{ end }}</section></div></section>
+{{ else }}
+  {{ range .Groups }}<section class="env-panel"><div class="env-grid"><section class="env-wide"><h4>{{ .Kind }} · {{ len .Files }}</h4><ul>{{ range .Files }}<li><a href="/files/{{ .Path }}">{{ .Name }}</a> <span class="dim">{{ .Agent }} · v{{ .Versions }} · {{ .Latest }}</span></li>{{ end }}</ul></section></div></section>{{ else }}<p class="dim">No synced memory, instruction, skill or settings files.</p>{{ end }}
+{{ end }}
+</div></div>
+{{ end }}

@@ -29,14 +29,14 @@ func New(root, url, token, agentName string) (*Config, error) {
 	if agentName == "" {
 		agentName = DefaultAgent
 	}
-	if _, ok := LookupProfile(agentName); !ok {
-		return nil, fmt.Errorf("unknown agent %q (known: %s)", agentName, strings.Join(ProfileNames(), ", "))
+	if _, ok := ResolveProfile(agentName); !ok {
+		return nil, UnknownAgentError(agentName)
 	}
 	if url == "" {
 		return nil, errors.New("server URL is required (--url, $CCCP_URL, or config.url)")
 	}
 	if token == "" {
-		return nil, errors.New("token is required (--token, $CCCP_TOKEN, or config.token)")
+		return nil, errors.New("token is required (--token, --token-file, $CCCP_TOKEN, $CCCP_TOKEN_FILE, or config token/token_file)")
 	}
 	hostID, err := loadOrCreateHostIDFor(root, agentName)
 	if err != nil {
@@ -55,11 +55,21 @@ func New(root, url, token, agentName string) (*Config, error) {
 	}, nil
 }
 
+func UnknownAgentError(agentName string) error {
+	return fmt.Errorf("unknown agent %q (known: %s; a non-claude agent may name a space of its own as <agent>-<space>, lowercase letters, digits and -_.)",
+		agentName, strings.Join(ProfileNames(), ", "))
+}
+
 func (c *Config) DefaultAllowlist() []string {
-	if p, ok := LookupProfile(c.Agent); ok && p.Allowlist != nil {
+	if p, ok := ResolveProfile(c.Agent); ok && p.Allowlist != nil {
 		return p.Allowlist
 	}
 	return DefaultAllowlist
+}
+
+func (c *Config) excluded(rel string) bool {
+	p, ok := ResolveProfile(c.Agent)
+	return ok && covers(p.Exclude, rel)
 }
 
 func (c *Config) localRel(wire string) (string, bool) {

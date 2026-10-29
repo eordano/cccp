@@ -31,10 +31,13 @@
 {{ else if .Session }}
   {{ template "session-header" . }}
   {{ template "env-panel" . }}
+  <div class="index-panel-slot" hx-get="/index-panel/{{ .CurrentPath }}" hx-trigger="load" hx-swap="outerHTML"></div>
   {{ template "timeline" .Timeline }}
   {{ if .Sae }}{{ template "sae-strip" .Sae }}{{ end }}
   <div id="session-path" data-session-path="{{ .CurrentPath }}" hidden></div>
   {{ template "live-connect" . }}
+{{ else if .Files }}
+  {{ template "files-main" .Files }}
 {{ else }}
   <header class="header">
     {{ template "sidebar-toggle" }}
@@ -76,7 +79,7 @@
 
 {{ define "event-child-session" }}
 <details class="sub-session" hx-get="/subagent/{{ .SubAgentPath }}" hx-trigger="toggle once" hx-target="find .sub-agent-timeline" hx-swap="innerHTML">
-  <summary><span class="agent-badge agent-{{ .Agent }}">{{ agentName .Agent }}</span> <span class="child-label">{{ .AgentID }}</span>{{ if .Text }} · {{ .Text }}{{ end }} <a class="open-link" href="/session/{{ .SubAgentPath }}">open ↗</a></summary>
+  <summary><span class="agent-badge agent-{{ agentKind .Agent }}">{{ agentName .Agent }}</span> <span class="child-label">{{ .AgentID }}</span>{{ if .Text }} · {{ .Text }}{{ end }} <a class="open-link" href="/session/{{ .SubAgentPath }}">open ↗</a></summary>
   <div class="sub-agent-timeline"><div class="dim">Loading…</div></div>
 </details>
 {{ end }}
@@ -127,7 +130,7 @@
 <nav class="agent-chips" aria-label="Filter by agent">
   <a class="chip{{ if not .AgentFilter }} chip-active{{ end }}" href="/{{ if .SearchQuery }}?q={{ .SearchQuery }}{{ end }}">All</a>
   {{ $q := .SearchQuery }}{{ $cur := .AgentFilter }}
-  {{ range .AgentCounts }}<a class="chip agent-{{ .Agent }}{{ if eq .Agent $cur }} chip-active{{ end }}" href="/?agent={{ .Agent }}{{ if $q }}&q={{ $q }}{{ end }}">{{ .Name }} <span class="chip-count">{{ .Count }}</span></a>{{ end }}
+  {{ range .AgentCounts }}<a class="chip agent-{{ agentKind .Agent }}{{ if eq .Agent $cur }} chip-active{{ end }}" href="/?agent={{ .Agent }}{{ if $q }}&q={{ $q }}{{ end }}">{{ .Name }} <span class="chip-count">{{ .Count }}</span></a>{{ end }}
 </nav>
 {{ end }}
 {{ end }}
@@ -138,7 +141,7 @@
 <header class="header">
   {{ template "sidebar-toggle" }}
   <div class="header-session">
-    <div class="session-title"><span class="agent-badge agent-{{ .SessionFile.Agent }}">{{ agentName .SessionFile.Agent }}</span> {{ if .SessionFile.Title }}{{ .SessionFile.Title }}{{ else }}{{ shortID .SessionFile.Name }}{{ end }}</div>
+    <div class="session-title"><span class="agent-badge agent-{{ agentKind .SessionFile.Agent }}">{{ agentName .SessionFile.Agent }}</span> {{ if .SessionFile.Title }}{{ .SessionFile.Title }}{{ else }}{{ shortID .SessionFile.Name }}{{ end }}</div>
     <div class="session-sub">
       <span id="session-metadata">{{ .Session.Metadata }}</span>
       {{ range .Session.Facts.Facts }}<span class="fact">{{ . }}</span>{{ end }}
@@ -160,6 +163,7 @@
   </summary>
   <div class="settings-panel">
     <a class="filter-item" href="/sae/settings" hx-boost="false">SAE display and status</a>
+    <a class="filter-item" href="/files">Memory, instructions and skills</a>
     {{ template "toggle-form" (dict "action" "/settings/jump-lines" "label" "Jump to newest on live updates" "on" .JumpLines) }}
     {{ template "toggle-form" (dict "action" "/settings/jump-file" "label" "Jump to newest file when it appears" "on" .JumpFile) }}
   </div>
@@ -283,7 +287,7 @@
      title="{{ $item.File.Path }}">
     <div class="file-title">{{ if $item.File.Title }}{{ $item.File.Title }}{{ else }}{{ shortID $item.File.Name }}...{{ end }}</div>
     <div class="file-meta">
-      <span class="agent-badge agent-{{ $item.File.Agent }}">{{ agentName $item.File.Agent }}</span>
+      <span class="agent-badge agent-{{ agentKind $item.File.Agent }}">{{ agentName $item.File.Agent }}</span>
       {{ if $item.Folder }}<span class="file-folder">{{ $item.Folder }}</span>{{ end }}
       {{ if $item.File.Host }}<span class="file-host">{{ $item.File.Host }}</span>{{ end }}
       <span>{{ formatStamp $item.File.Modified }}</span>

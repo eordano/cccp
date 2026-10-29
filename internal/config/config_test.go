@@ -13,13 +13,21 @@ func isolateEnv(t *testing.T) {
 	for _, k := range []string{
 		"CCCP_DIR", "CCCP_URL", "CCCP_TOKEN",
 		"CCCP_ADDR", "CCCP_PORT", "CCCP_DB", "CCCP_DEBOUNCE_MS", "CCCP_CONFIG",
-		"CCCP_CHEKA_ALLOW", "CCCP_CHEKA_REDACT",
-		"HOME",
+		"CCCP_CHEKA_ALLOW", "CCCP_CHEKA_REDACT", "CCCP_TOKEN_FILE", "CCCP_AGENT",
+		"CCCP_PUSH_TOKEN", "CCCP_READ_TOKEN_FILE",
+		"HOME", "XDG_CONFIG_HOME",
 	} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
 	}
 	t.Setenv("HOME", t.TempDir())
+}
+
+func writeConfig(t *testing.T, dir, body string) string {
+	cfgPath := filepath.Join(dir, "cccp", "config.json")
+	os.MkdirAll(filepath.Dir(cfgPath), 0o755)
+	os.WriteFile(cfgPath, []byte(body), 0o600)
+	return cfgPath
 }
 
 func parseAndResolve(t *testing.T, args []string) *Resolved {
@@ -91,9 +99,7 @@ func TestConfigFileLayer(t *testing.T) {
 func TestEnvOverridesFile(t *testing.T) {
 	isolateEnv(t)
 	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "cccp", "config.json")
-	os.MkdirAll(filepath.Dir(cfgPath), 0o755)
-	os.WriteFile(cfgPath, []byte(`{"url":"https://file.example","token":"ft"}`), 0o600)
+	writeConfig(t, dir, `{"url":"https://file.example","token":"ft"}`)
 
 	t.Setenv("CCCP_DIR", dir)
 	t.Setenv("CCCP_URL", "https://env.example")
@@ -111,9 +117,7 @@ func TestEnvOverridesFile(t *testing.T) {
 func TestCLIBeatsEnvBeatsFile(t *testing.T) {
 	isolateEnv(t)
 	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "cccp", "config.json")
-	os.MkdirAll(filepath.Dir(cfgPath), 0o755)
-	os.WriteFile(cfgPath, []byte(`{"url":"https://file","token":"ft","addr":":1"}`), 0o600)
+	writeConfig(t, dir, `{"url":"https://file","token":"ft","addr":":1"}`)
 
 	t.Setenv("CCCP_DIR", dir)
 	t.Setenv("CCCP_URL", "https://env")
@@ -140,9 +144,7 @@ func TestEmptyFlagOverridesLowerLayer(t *testing.T) {
 func TestEmptyEnvOverridesFile(t *testing.T) {
 	isolateEnv(t)
 	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "cccp", "config.json")
-	os.MkdirAll(filepath.Dir(cfgPath), 0o755)
-	os.WriteFile(cfgPath, []byte(`{"url":"https://file"}`), 0o600)
+	writeConfig(t, dir, `{"url":"https://file"}`)
 
 	t.Setenv("CCCP_DIR", dir)
 	t.Setenv("CCCP_URL", "")
@@ -225,9 +227,7 @@ func TestDebounceLayering(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "cccp", "config.json")
-	os.MkdirAll(filepath.Dir(cfgPath), 0o755)
-	os.WriteFile(cfgPath, []byte(`{"debounce_ms":250}`), 0o600)
+	writeConfig(t, dir, `{"debounce_ms":250}`)
 	r = parseAndResolve(t, []string{"--dir", dir})
 	if r.DebounceMS != 250 {
 		t.Errorf("file DebounceMS = %d, want 250", r.DebounceMS)
@@ -263,9 +263,7 @@ func TestAddrWithSchemeBecomesURL(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "cccp", "config.json")
-	os.MkdirAll(filepath.Dir(cfgPath), 0o755)
-	os.WriteFile(cfgPath, []byte(`{"url":"https://prod.example"}`), 0o600)
+	cfgPath := writeConfig(t, dir, `{"url":"https://prod.example"}`)
 	r = parseAndResolve(t, []string{"--dir", dir, "--addr", "http://localhost:9876"})
 	if r.URL != "http://localhost:9876" {
 		t.Errorf("URL = %q, want http://localhost:9876 (CLI --addr overrides config url)", r.URL)
@@ -312,9 +310,7 @@ func TestChekaAllowLayering(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "cccp", "config.json")
-	os.MkdirAll(filepath.Dir(cfgPath), 0o755)
-	os.WriteFile(cfgPath, []byte(`{"cheka_allow":3}`), 0o600)
+	writeConfig(t, dir, `{"cheka_allow":3}`)
 	r = parseAndResolve(t, []string{"--dir", dir})
 	if r.ChekaAllow != 3 {
 		t.Errorf("file ChekaAllow = %d, want 3", r.ChekaAllow)
@@ -350,9 +346,7 @@ func TestChekaRedactLayering(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "cccp", "config.json")
-	os.MkdirAll(filepath.Dir(cfgPath), 0o755)
-	os.WriteFile(cfgPath, []byte(`{"cheka_redact":false}`), 0o600)
+	cfgPath := writeConfig(t, dir, `{"cheka_redact":false}`)
 	r = parseAndResolve(t, []string{"--dir", dir})
 	if r.ChekaRedact {
 		t.Errorf("file explicit-false ChekaRedact = true, want false")
@@ -399,9 +393,7 @@ func TestChekaRedactBadEnvErrors(t *testing.T) {
 func TestUnknownFieldRejected(t *testing.T) {
 	isolateEnv(t)
 	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "cccp", "config.json")
-	os.MkdirAll(filepath.Dir(cfgPath), 0o755)
-	os.WriteFile(cfgPath, []byte(`{"nonsense":"x"}`), 0o600)
+	writeConfig(t, dir, `{"nonsense":"x"}`)
 
 	fs := flag.NewFlagSet("t", flag.ContinueOnError)
 	cli := RegisterFlags(fs)
@@ -422,9 +414,7 @@ func TestPushOnlyLayering(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "cccp", "config.json")
-	os.MkdirAll(filepath.Dir(cfgPath), 0o755)
-	os.WriteFile(cfgPath, []byte(`{"push_only":true}`), 0o600)
+	writeConfig(t, dir, `{"push_only":true}`)
 	r = parseAndResolve(t, []string{"--dir", dir})
 	if !r.PushOnly {
 		t.Errorf("file push_only=true did not set PushOnly")
@@ -474,5 +464,79 @@ func TestAgentResolution(t *testing.T) {
 	}
 	if r.Agent != "claude" || r.Dir != "/tmp/elsewhere" {
 		t.Fatalf("explicit dir: %q %q", r.Agent, r.Dir)
+	}
+	t.Setenv("HERMES_HOME", "")
+	r = parseAndResolve(t, []string{"--agent", "hermes-buzz-fizz"})
+	if r.Agent != "hermes-buzz-fizz" || r.Dir != filepath.Join(home, ".hermes") {
+		t.Fatalf("own space resolves its profile's dir: %q %q", r.Agent, r.Dir)
+	}
+	fs = flag.NewFlagSet("t", flag.ContinueOnError)
+	cli = RegisterFlags(fs)
+	if err := fs.Parse([]string{"--agent", "claude-x"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resolve(fs, cli); err == nil {
+		t.Fatal("claude has no named spaces")
+	}
+}
+
+func TestTokenFile(t *testing.T) {
+	isolateEnv(t)
+	tok := filepath.Join(t.TempDir(), "token")
+	os.WriteFile(tok, []byte("from-file\n"), 0o400)
+	r := parseAndResolve(t, []string{"--token-file", tok})
+	if r.Token != "from-file" {
+		t.Errorf("Token = %q, want from-file", r.Token)
+	}
+	r = parseAndResolve(t, []string{"--token-file", tok, "--token", "explicit"})
+	if r.Token != "explicit" {
+		t.Errorf("explicit token lost to token file: %q", r.Token)
+	}
+	r = parseAndResolve(t, []string{"--token-file", filepath.Join(t.TempDir(), "missing")})
+	if r.Token != "" || r.TokenFileErr == nil {
+		t.Errorf("unreadable token file: Token=%q err=%v", r.Token, r.TokenFileErr)
+	}
+}
+
+func TestUserConfigBeatsAgentDirConfig(t *testing.T) {
+	isolateEnv(t)
+	home := os.Getenv("HOME")
+	writeConfig(t, filepath.Join(home, ".claude"), `{"url":"http://planted-by-agent"}`)
+	r := parseAndResolve(t, nil)
+	if r.URL != "http://planted-by-agent" {
+		t.Fatalf("agent-dir config not used when no user config exists: %q", r.URL)
+	}
+	user := filepath.Join(home, ".config", "cccp", "claude.json")
+	os.MkdirAll(filepath.Dir(user), 0o755)
+	os.WriteFile(user, []byte(`{"url":"http://trusted","token_file":"/nonexistent"}`), 0o644)
+	r = parseAndResolve(t, nil)
+	if r.URL != "http://trusted" || r.Source != user {
+		t.Errorf("URL=%q Source=%q, want the user config", r.URL, r.Source)
+	}
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg"))
+	r = parseAndResolve(t, nil)
+	if r.URL != "http://planted-by-agent" {
+		t.Errorf("XDG_CONFIG_HOME not honoured: %q", r.URL)
+	}
+}
+
+func TestReadTokenFileLayers(t *testing.T) {
+	isolateEnv(t)
+	dir := t.TempDir()
+	t.Setenv("CCCP_DIR", dir)
+
+	if r := parseAndResolve(t, nil); r.ReadTokenFile != "" {
+		t.Errorf("default ReadTokenFile = %q, want empty", r.ReadTokenFile)
+	}
+	writeConfig(t, dir, `{"read_token_file":"/from/file"}`)
+	if r := parseAndResolve(t, nil); r.ReadTokenFile != "/from/file" {
+		t.Errorf("file ReadTokenFile = %q", r.ReadTokenFile)
+	}
+	t.Setenv("CCCP_READ_TOKEN_FILE", "/from/env")
+	if r := parseAndResolve(t, nil); r.ReadTokenFile != "/from/env" {
+		t.Errorf("env ReadTokenFile = %q", r.ReadTokenFile)
+	}
+	if r := parseAndResolve(t, []string{"--read-token-file", "/from/cli"}); r.ReadTokenFile != "/from/cli" {
+		t.Errorf("cli ReadTokenFile = %q", r.ReadTokenFile)
 	}
 }

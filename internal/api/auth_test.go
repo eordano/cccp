@@ -308,6 +308,10 @@ func TestPushToken_AuthorizesOnlyPushEndpoints(t *testing.T) {
 		{http.MethodGet, "/log/since"},
 		{http.MethodGet, "/events"},
 		{http.MethodGet, "/session/x"},
+		{http.MethodGet, "/sessions"},
+		{http.MethodGet, "/sessions/x"},
+		{http.MethodGet, "/index-panel/x"},
+		{http.MethodGet, "/files/skills/x/SKILL.md"},
 	} {
 		if code := doAuthed(h, c.method, c.path, "push-token"); code != http.StatusUnauthorized {
 			t.Errorf("%s %s with push token: got %d, want 401", c.method, c.path, code)

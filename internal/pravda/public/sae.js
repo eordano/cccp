@@ -95,13 +95,13 @@
       const d = this.data.dictionary || {}, state = this.data.status || {}; const section = el('section', 'sae-status-card');
       if (this.data.session) section.append(el('p', '', `${state.tagged || 0} / ${state.eligible || 0} text events have saved results.`));
       section.append(el('p', '', state.detail || 'No processing status is available.'));
-      section.append(el('p', 'sae-muted', `Selected dictionary: ${d.name || d.id || 'none'} · ${d.features || 0} features${state.updated_at ? ' · Imported ' + state.updated_at : ''}`));
+      section.append(el('p', 'sae-muted', `Selected dictionary: ${d.name || d.id || 'none'}${d.model ? ' · ' + d.model + ' layer ' + d.layer : ''} · ${d.features || 0} features${state.updated_at ? ' · Imported ' + state.updated_at : ''}`));
       const label = el('label', '', 'Find a dictionary '); const search = el('input', 'sae-search'); search.type = 'search'; search.placeholder = 'Search dictionaries'; label.append(search);
       const form = el('form', 'sae-dictionary-form'); form.method = 'post'; form.action = '/settings/sae-encoder';
       const apply = el('button', '', 'Use dictionary'); apply.type = 'submit';
       const empty = el('p', 'sae-muted', 'No matching dictionaries.'); empty.hidden = true; empty.setAttribute('role', 'status');
       const select = el('select'); select.name = 'encoder'; select.setAttribute('aria-label', 'Dictionary'); const dictionaries = this.data.dictionaries || [];
-      function options(query) { select.replaceChildren(); dictionaries.filter(item => `${item.name} ${item.id} ${item.created_at}`.toLowerCase().includes(query)).forEach(item => { const o = el('option', '', `${item.name || item.id} · ${item.features || 0} features · ${item.created_at || ''}`); o.value = item.id; o.selected = item.id === d.id; select.append(o); }); apply.disabled = select.options.length === 0; select.disabled = apply.disabled; empty.hidden = !apply.disabled; }
+      function options(query) { select.replaceChildren(); dictionaries.filter(item => `${item.name} ${item.id} ${item.model || ''} ${item.created_at}`.toLowerCase().includes(query)).forEach(item => { const o = el('option', '', `${item.name || item.id}${item.model ? ' · ' + item.model + ' L' + item.layer : ''} · ${item.features || 0} features · ${item.created_at || ''}`); o.value = item.id; o.selected = item.id === d.id; select.append(o); }); apply.disabled = select.options.length === 0; select.disabled = apply.disabled; empty.hidden = !apply.disabled; }
       options(''); search.addEventListener('input', () => options(search.value.toLowerCase()));
       form.append(select, apply, empty);
       section.append(label, form, el('p', 'sae-muted', 'Switching changes the features and saved values you explore. Opening a conversation requests missing values when scoring is available. Each dictionary keeps its own display defaults.'), link('Browse feature descriptions and coverage', this.data.features_url || '/sae/features'));

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/eordano/cccp/internal/api"
@@ -21,6 +22,8 @@ func runServe(ctx context.Context, args []string) error {
 	saeDir := fs.String("sae-dir", "", "directory of daily SAE pages served under /sae/daily/")
 	saeCaptureURL := fs.String("sae-capture-url", "", "capture service base URL for asynchronous SAE scoring")
 	saeModelsDir := fs.String("sae-models-dir", "", "directory of SAE weights and original scales, keyed by encoder SHA256")
+	precheck := fs.String("review-precheck", "", "command run on each proposed knowledge version (content on stdin); its verdict annotates the review queue and never approves")
+	index := fs.Bool("index", true, "maintain the session index (rebuilds in the background when missing or outdated)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -31,6 +34,10 @@ func runServe(ctx context.Context, args []string) error {
 
 	if cfg.Token == "" {
 		return fmt.Errorf("token is required (--token, $CCCP_TOKEN, or config.token)")
+	}
+	readToken, err := loadReadToken(cfg.ReadTokenFile, cfg.Token, cfg.PushToken)
+	if err != nil {
+		return err
 	}
 
 	if err := os.MkdirAll(filepath.Dir(cfg.DB), 0o755); err != nil {
@@ -61,15 +68,20 @@ func runServe(ctx context.Context, args []string) error {
 		slog.Warn("sae index unavailable", "error", err)
 	}
 	go watchSrv.Run(ctx)
+	if *index {
+		go (&pravda.Indexer{Store: st, Log: logger}).Follow(ctx, events)
+	}
 
 	srv := &api.Server{
 		Store:     st,
 		Token:     cfg.Token,
 		PushToken: cfg.PushToken,
+		ReadToken: readToken,
 		Log:       logger,
 		Events:    events,
 		Watch:     watchSrv.Routes(),
 		SaeDir:    *saeDir,
+		Precheck:  *precheck,
 	}
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
@@ -100,4 +112,24 @@ func runServe(ctx context.Context, args []string) error {
 		logger.Warn("shutdown", "err", err)
 	}
 	return nil
+}
+
+func loadReadToken(path, token, pushToken string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read token file: %w", err)
+	}
+	t := strings.TrimSpace(string(b))
+	switch {
+	case t == "":
+		return "", fmt.Errorf("read token file %s is empty", path)
+	case t == token:
+		return "", fmt.Errorf("read token must differ from the full token")
+	case t == pushToken:
+		return "", fmt.Errorf("read token must differ from the push token")
+	}
+	return t, nil
 }

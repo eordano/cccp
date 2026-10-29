@@ -216,7 +216,9 @@ func spawnWatchDaemon(cfg *config.Resolved, paths secretary.Paths) error {
 	if cfg.URL != "" {
 		runArgs = append(runArgs, "--url", cfg.URL)
 	}
-	if cfg.Token != "" {
+	if cfg.TokenFile != "" && cfg.TokenFromFile {
+		runArgs = append(runArgs, "--token-file", cfg.TokenFile)
+	} else if cfg.Token != "" {
 		runArgs = append(runArgs, "--token", cfg.Token)
 	}
 	if cfg.PushOnly {

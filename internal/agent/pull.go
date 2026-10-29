@@ -19,16 +19,20 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/eordano/cccp/internal/syncclass"
 )
 
 type PullResult struct {
-	TarFiles    int
-	TarWritten  int
-	TarBytes    int64
-	TarRemoved  int
-	LogFiles    int
-	LogLinesNew int
-	NewCursor   int64
+	TarFiles     int
+	TarWritten   int
+	TarBytes     int64
+	TarRemoved   int
+	TarRefused   int
+	TarKeptLocal int
+	LogFiles     int
+	LogLinesNew  int
+	NewCursor    int64
 }
 
 func Pull(ctx context.Context, c *Config, full bool) (*PullResult, error) {
@@ -43,16 +47,19 @@ func Pull(ctx context.Context, c *Config, full bool) (*PullResult, error) {
 		cursor = 0
 	}
 
-	seen, shas, err := pullCurrent(ctx, c, res)
+	snap, err := pullCurrent(ctx, c, state, res)
 	if err != nil {
 		return nil, fmt.Errorf("pull current: %w", err)
 	}
-	if res.TarFiles == 0 && len(state.KnownPulledBlobPaths) > 0 {
+	if snap.transcripts == 0 && snap.knowledge == 0 && len(state.KnownPulledBlobPaths) > 0 {
 		slog.Warn("pull: server snapshot is empty; refusing to remove previously pulled files",
 			"known", len(state.KnownPulledBlobPaths))
 	} else {
 		for _, p := range state.KnownPulledBlobPaths {
-			if _, ok := seen[p]; ok {
+			if _, ok := snap.seen[p]; ok || c.excluded(p) {
+				continue
+			}
+			if syncclass.Classify(c.Prefix+p, 0) != syncclass.ClassTranscript {
 				continue
 			}
 			abs := filepath.Join(c.Root, p)
@@ -66,10 +73,10 @@ func Pull(ctx context.Context, c *Config, full bool) (*PullResult, error) {
 			res.TarRemoved++
 		}
 		state.KnownPulledBlobPaths = state.KnownPulledBlobPaths[:0]
-		for p := range seen {
+		for p := range snap.seen {
 			state.KnownPulledBlobPaths = append(state.KnownPulledBlobPaths, p)
 		}
-		state.PulledSHAs = shas
+		state.PulledSHAs = snap.shas
 	}
 
 	newCursor, fullOffsets, err := pullLogs(ctx, c, res, cursor, full)
@@ -94,24 +101,40 @@ func Pull(ctx context.Context, c *Config, full bool) (*PullResult, error) {
 	return res, nil
 }
 
-func pullCurrent(ctx context.Context, c *Config, res *PullResult) (map[string]struct{}, map[string]string, error) {
+type snapshot struct {
+	seen        map[string]struct{}
+	shas        map[string]string
+	transcripts int
+	knowledge   int
+}
+
+func pullCurrent(ctx context.Context, c *Config, state *State, res *PullResult) (*snapshot, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", c.ServerURL+"/current", nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	c.AuthReq(req)
+	req.Header.Set(syncclass.GateHeader, "1")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return nil, nil, fmt.Errorf("/current %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return nil, fmt.Errorf("/current %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	gated := resp.Header.Get(syncclass.GateHeader) == "1"
+	if !gated {
+		slog.Warn("pull: server does not gate knowledge files; applying transcripts only")
 	}
 
-	seen := map[string]struct{}{}
-	shas := map[string]string{}
+	snap := &snapshot{seen: map[string]struct{}{}, shas: map[string]string{}}
+	for p, sha := range state.PulledSHAs {
+		if syncclass.Classify(c.Prefix+p, 0) != syncclass.ClassTranscript {
+			snap.shas[p] = sha
+		}
+	}
 	tr := tar.NewReader(resp.Body)
 	for {
 		hdr, err := tr.Next()
@@ -119,33 +142,101 @@ func pullCurrent(ctx context.Context, c *Config, res *PullResult) (map[string]st
 			break
 		}
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if hdr.Typeflag != tar.TypeReg {
 			continue
 		}
 		rel, ok := c.localRel(hdr.Name)
-		if !ok {
+		if !ok || c.excluded(rel) {
 			continue
 		}
 		res.TarFiles++
-		seen[rel] = struct{}{}
+		class := syncclass.Classify(hdr.Name, uint32(hdr.Mode))
+		if class == syncclass.ClassPrivileged || (class == syncclass.ClassKnowledge && !gated) {
+			slog.Debug("pull: refusing non-applicable path", "path", hdr.Name, "class", class)
+			res.TarRefused++
+			continue
+		}
 		buf, err := io.ReadAll(tr)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
+		if class == syncclass.ClassKnowledge {
+			if err := applyKnowledge(c, state, snap, res, rel, hdr, buf); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		snap.transcripts++
+		snap.seen[rel] = struct{}{}
 		sum := sha256.Sum256(buf)
-		shas[rel] = hex.EncodeToString(sum[:])
+		snap.shas[rel] = hex.EncodeToString(sum[:])
 		changed, err := writeIfDifferent(c.Root, rel, hdr.Mode, hdr.ModTime, buf)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if changed {
 			res.TarWritten++
 			res.TarBytes += int64(len(buf))
 		}
 	}
-	return seen, shas, nil
+	return snap, nil
+}
+
+func applyKnowledge(c *Config, state *State, snap *snapshot, res *PullResult, rel string, hdr *tar.Header, buf []byte) error {
+	snap.knowledge++
+	abs := filepath.Join(c.Root, rel)
+	prev := state.PulledSHAs[rel]
+	if li, err := os.Lstat(abs); err == nil && li.Mode()&os.ModeSymlink != 0 {
+		slog.Warn("pull: keeping managed symlink over approved knowledge version", "path", rel)
+		res.TarKeptLocal++
+		return nil
+	}
+	local, localErr := os.ReadFile(abs)
+	localSHA := ""
+	if localErr == nil {
+		sum := sha256.Sum256(local)
+		localSHA = hex.EncodeToString(sum[:])
+	}
+
+	if hdr.PAXRecords[syncclass.PAXDeleted] == "1" {
+		delete(snap.shas, rel)
+		if localErr != nil {
+			return nil
+		}
+		if prev == "" || localSHA != prev {
+			slog.Warn("pull: keeping locally modified file despite approved deletion", "path", rel)
+			res.TarKeptLocal++
+			snap.shas[rel] = prev
+			return nil
+		}
+		if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove %s: %w", rel, err)
+		}
+		res.TarRemoved++
+		return nil
+	}
+
+	sum := sha256.Sum256(buf)
+	sha := hex.EncodeToString(sum[:])
+	snap.seen[rel] = struct{}{}
+	if localErr == nil && localSHA != sha && localSHA != prev {
+		slog.Warn("pull: keeping local edit over approved knowledge version", "path", rel)
+		res.TarKeptLocal++
+		snap.shas[rel] = prev
+		return nil
+	}
+	snap.shas[rel] = sha
+	changed, err := writeIfDifferent(c.Root, rel, hdr.Mode, hdr.ModTime, buf)
+	if err != nil {
+		return err
+	}
+	if changed {
+		res.TarWritten++
+		res.TarBytes += int64(len(buf))
+	}
+	return nil
 }
 
 func safeToRemove(abs string, knownSHAs ...string) bool {
@@ -184,7 +275,7 @@ func writeIfDifferent(root, rel string, mode int64, mtime time.Time, content []b
 		tmp.Close()
 		return false, err
 	}
-	if err := tmp.Chmod(os.FileMode(mode) & 0o7777); err != nil {
+	if err := tmp.Chmod(os.FileMode(mode) & 0o666); err != nil {
 		tmp.Close()
 		return false, err
 	}
@@ -252,7 +343,7 @@ func pullLogs(ctx context.Context, c *Config, res *PullResult, since int64, full
 			maxFirstSeen = l.FirstSeen
 		}
 		rel, ok := c.localRel(l.Path)
-		if !ok {
+		if !ok || c.excluded(rel) || syncclass.Classify(l.Path, 0) != syncclass.ClassTranscript {
 			continue
 		}
 		byPath[rel] = append(byPath[rel], l)

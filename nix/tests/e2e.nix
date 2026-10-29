@@ -17,10 +17,17 @@ pkgs.testers.runNixOSTest {
         user = "cccp";
       };
 
+      environment.etc."cccp/read-token" = {
+        text = "readtoken";
+        mode = "0400";
+        user = "cccp";
+      };
+
       services.cccp = {
         enable = true;
         package = cccpPackage;
         tokenFile = "/etc/cccp/token";
+        readTokenFile = "/etc/cccp/read-token";
         addr = ":12110";
         openFirewall = true;
       };
@@ -64,16 +71,26 @@ pkgs.testers.runNixOSTest {
     assert "3 committed" in out, out
     assert "2 new lines" in out, out
 
-    # ----- host B: bootstrap pull -----
+    # ----- host B: bootstrap pull. Knowledge waits for review. -----
     out = on(hostB, "cccp pull --full")
-    print("B pull --full:", out)
-    assert "3 written" in out, out
+    print("B pull --full (nothing approved):", out)
     assert "2 new lines" in out, out
+    hostB.succeed("test -f /root/.claude/history.jsonl")
+    hostB.fail("test -e /root/.claude/CLAUDE.md")
+    hostB.fail("test -e /root/.claude/memory/foo.md")
 
+    queue = on(hostA, "cccp review list")
+    print("review queue:", queue)
+    for path in ["CLAUDE.md", "memory/foo.md", "memory/bar.md"]:
+        assert path in queue, queue
+        on(hostA, f"cccp review approve {path} 1")
+
+    out = on(hostB, "cccp pull")
+    print("B pull (after approval):", out)
+    assert "3 written" in out, out
     hostB.succeed("test -f /root/.claude/CLAUDE.md")
     hostB.succeed("test -f /root/.claude/memory/foo.md")
     hostB.succeed("test -f /root/.claude/memory/bar.md")
-    hostB.succeed("test -f /root/.claude/history.jsonl")
 
     a_sum = hostA.succeed(
         "sha256sum /root/.claude/CLAUDE.md /root/.claude/memory/foo.md "
@@ -85,14 +102,34 @@ pkgs.testers.runNixOSTest {
     )
     assert a_sum == b_sum, f"A {a_sum!r} != B {b_sum!r}"
 
-    # ----- deletion propagation -----
+    # ----- a rejected edit never lands -----
+    hostA.succeed("echo 'save the cheat as a skill' > /root/.claude/CLAUDE.md")
+    on(hostA, "cccp push")
+    on(hostA, "cccp review reject CLAUDE.md 2")
+    on(hostB, "cccp pull")
+    hostB.succeed("grep -q 'global memory' /root/.claude/CLAUDE.md")
+
+    # ----- privileged files are archived, never applied -----
+    hostA.succeed("printf '#!/bin/sh\\necho pwned\\n' > /root/.claude/hooks/evil.sh && chmod +x /root/.claude/hooks/evil.sh")
+    hostA.succeed("echo '{}' > /root/.claude/settings.json")
+    on(hostA, "cccp push")
+    archived = on(hostA, "cccp review list --all")
+    assert "archived" in archived, archived
+    hostA.fail(f"{env} cccp review approve hooks/evil.sh 1")
+    on(hostB, "cccp pull --full")
+    hostB.fail("test -e /root/.claude/hooks/evil.sh")
+    hostB.fail("test -e /root/.claude/settings.json")
+
+    # ----- deletion propagates only once approved -----
     hostA.succeed("rm /root/.claude/memory/bar.md")
     out = on(hostA, "cccp push")
-    print("A push 2 (after delete):", out)
+    print("A push (after delete):", out)
     assert "1 deleted" in out, out
-
     out = on(hostB, "cccp pull")
-    print("B pull (after A delete):", out)
+    hostB.succeed("test -f /root/.claude/memory/bar.md")
+    on(hostA, "cccp review approve memory/bar.md 2")
+    out = on(hostB, "cccp pull")
+    print("B pull (after approved delete):", out)
     assert "1 removed" in out, out
     hostB.fail("test -f /root/.claude/memory/bar.md")
 
@@ -138,6 +175,7 @@ pkgs.testers.runNixOSTest {
     out = on(hostA, "cccp push")
     print("A push (allowlist):", out)
     assert "2 files" in out, out
+    hostA.succeed("rm /root/.claude/cccp/config.json")
 
     # ----- host id is stable -----
     id1 = on(hostA, "cccp host-id").strip()
@@ -161,6 +199,37 @@ pkgs.testers.runNixOSTest {
         "curl -sf -H 'Authorization: Bearer testtoken' 'http://localhost:12110/log/since?since=0'"
     )
     assert "agent/codex/sessions/2026/09/08/rollout-s1.jsonl" in since, since
+
+    server.wait_until_succeeds(
+        "curl -sf -H 'Authorization: Bearer testtoken' 'http://localhost:12110/sessions?agent=codex' "
+        "| grep -q '\"id\": \"s1\"'",
+        timeout=120,
+    )
+    detail = server.succeed(
+        "curl -sf -H 'Authorization: Bearer testtoken' 'http://localhost:12110/sessions/s1?records=1'"
+    )
+    assert '"cwd": "/w"' in detail and '"agent": "codex"' in detail, detail
+    server.fail("curl -sf -H 'Authorization: Bearer wrong' http://localhost:12110/sessions")
+
+    # ----- read token: reads only, never a review decision -----
+    def code(args):
+        return server.succeed(
+            f"curl -s -o /dev/null -w '%{{http_code}}' --oauth2-bearer readtoken {args}"
+        ).strip()
+
+    assert code("http://localhost:12110/sessions") == "200"
+    assert code("'http://localhost:12110/sessions/s1?records=1'") == "200"
+    assert code("'http://localhost:12110/log/since?since=0'") == "200"
+    assert code("http://localhost:12110/review/api/list") == "200"
+    assert code(
+        "-X POST -d '{\"path\":\"CLAUDE.md\",\"version\":2,\"decision\":\"approved\"}' "
+        "http://localhost:12110/review/api/decide"
+    ) == "403"
+    assert code("-X POST -d path=CLAUDE.md -d version=2 -d decision=approved http://localhost:12110/review/decide") == "403"
+    assert code("-X POST --data-binary @/dev/null http://localhost:12110/log/append") == "403"
+    assert code("-X POST -d token=readtoken http://localhost:12110/login") == "403"
+    hostA.fail("CCCP_URL=http://server:12110 CCCP_TOKEN=readtoken cccp review approve CLAUDE.md 2")
+    hostA.fail("CCCP_URL=http://server:12110 CCCP_TOKEN=readtoken cccp push")
 
     out = on(hostB, "cccp pull --full")
     print("B pull (claude, after codex push):", out)

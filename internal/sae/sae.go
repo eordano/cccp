@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS sae_encoders (
   layer       INTEGER NOT NULL,
   imported_at INTEGER NOT NULL,
   current     INTEGER NOT NULL DEFAULT 0,
-  label       TEXT NOT NULL DEFAULT ''
+  label       TEXT NOT NULL DEFAULT '',
+  model       TEXT NOT NULL DEFAULT ''
 ) STRICT;
 CREATE TABLE IF NOT EXISTS sae_features (
   encoder     TEXT NOT NULL,
@@ -60,6 +61,11 @@ CREATE TABLE IF NOT EXISTS sae_record_features (
 `
 
 const SnippetChars = 240
+
+const (
+	LegacyModel = "poolside/Laguna-XS-2.1-NVFP4"
+	LegacyLayer = 19
+)
 const SimilarDefaultLimit = 40
 
 type Index struct{ db *sql.DB }
@@ -96,6 +102,11 @@ func New(db *sql.DB) (*Index, error) {
 	}
 	_, _ = db.Exec(`ALTER TABLE sae_encoders ADD COLUMN label TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE sae_records ADD COLUMN norm REAL NOT NULL DEFAULT 0`)
+	if _, err := db.Exec(`ALTER TABLE sae_encoders ADD COLUMN model TEXT NOT NULL DEFAULT ''`); err == nil {
+		if _, err := db.Exec(`UPDATE sae_encoders SET model=? WHERE model=''`, LegacyModel); err != nil {
+			return nil, fmt.Errorf("sae model backfill: %w", err)
+		}
+	}
 	ix := &Index{db: db}
 	if err := ix.backfillFeatureIndex(context.Background()); err != nil {
 		return nil, fmt.Errorf("sae feature index: %w", err)
@@ -173,7 +184,7 @@ func (ix *Index) backfillFeatureIndex(ctx context.Context) error {
 // the tagging encoder. Nothing is deleted unless an operator asks for it.
 func (ix *Index) StaleDaily(ctx context.Context, keep time.Duration) ([]Encoder, error) {
 	cutoff := time.Now().Add(-keep).Unix()
-	rows, err := ix.db.QueryContext(ctx, `SELECT encoder, label, imported_at, (SELECT count(*) FROM sae_records r WHERE r.encoder=e.encoder) FROM sae_encoders e WHERE label LIKE 'daily-%' AND current=0 AND imported_at < ? ORDER BY imported_at`, cutoff)
+	rows, err := ix.db.QueryContext(ctx, `SELECT encoder, model, layer, label, imported_at, (SELECT count(*) FROM sae_records r WHERE r.encoder=e.encoder) FROM sae_encoders e WHERE label LIKE 'daily-%' AND current=0 AND imported_at < ? ORDER BY imported_at`, cutoff)
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +193,7 @@ func (ix *Index) StaleDaily(ctx context.Context, keep time.Duration) ([]Encoder,
 	for rows.Next() {
 		var e Encoder
 		var at int64
-		if err := rows.Scan(&e.Encoder, &e.Label, &at, &e.Records); err != nil {
+		if err := rows.Scan(&e.Encoder, &e.Model, &e.Layer, &e.Label, &at, &e.Records); err != nil {
 			return nil, err
 		}
 		e.ImportedAt = time.Unix(at, 0)
@@ -214,6 +225,7 @@ func (ix *Index) DeleteEncoder(ctx context.Context, enc string) error {
 
 type Encoder struct {
 	Encoder    string
+	Model      string
 	Width      int
 	TopK       int
 	Layer      int
@@ -245,7 +257,7 @@ func (ix *Index) encoders(ctx context.Context, withCounts bool) ([]Encoder, erro
 	if withCounts {
 		count = "(SELECT count(*) FROM sae_records r WHERE r.encoder=e.encoder)"
 	}
-	rows, err := ix.db.QueryContext(ctx, `SELECT e.encoder, e.width, e.top_k, e.layer, e.imported_at, e.current, e.label, `+count+` FROM sae_encoders e ORDER BY e.imported_at DESC`)
+	rows, err := ix.db.QueryContext(ctx, `SELECT e.encoder, e.model, e.width, e.top_k, e.layer, e.imported_at, e.current, e.label, `+count+` FROM sae_encoders e ORDER BY e.imported_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -255,7 +267,7 @@ func (ix *Index) encoders(ctx context.Context, withCounts bool) ([]Encoder, erro
 		var e Encoder
 		var at int64
 		var cur int
-		if err := rows.Scan(&e.Encoder, &e.Width, &e.TopK, &e.Layer, &at, &cur, &e.Label, &e.Records); err != nil {
+		if err := rows.Scan(&e.Encoder, &e.Model, &e.Width, &e.TopK, &e.Layer, &at, &cur, &e.Label, &e.Records); err != nil {
 			return nil, err
 		}
 		e.ImportedAt = time.Unix(at, 0)
@@ -267,9 +279,41 @@ func (ix *Index) encoders(ctx context.Context, withCounts bool) ([]Encoder, erro
 
 type ImportOptions struct {
 	StripPrefix string
+	Model       string
 	Layer       int
 	Label       string
 	Promote     bool
+}
+
+type encoderIdentity struct {
+	Model string
+	Layer int
+}
+
+func resolveIdentity(model string, layer *int, o ImportOptions) (encoderIdentity, error) {
+	id := encoderIdentity{Model: model}
+	switch {
+	case model == "" && o.Model != "":
+		id.Model = o.Model
+	case model == "":
+		id.Model = LegacyModel
+	case o.Model != "" && o.Model != model:
+		return id, fmt.Errorf("result.json names capture model %q but the import was told %q", model, o.Model)
+	}
+	switch {
+	case layer == nil && o.Layer != 0:
+		id.Layer = o.Layer
+	case layer == nil:
+		id.Layer = LegacyLayer
+	case o.Layer != 0 && o.Layer != *layer:
+		return id, fmt.Errorf("result.json names capture layer %d but the import was told %d", *layer, o.Layer)
+	default:
+		id.Layer = *layer
+	}
+	if id.Layer < 0 {
+		return id, fmt.Errorf("invalid capture layer %d", id.Layer)
+	}
+	return id, nil
 }
 
 func RecordID(kind, text string) string {
@@ -305,17 +349,15 @@ type namesFile struct {
 	} `json:"names"`
 }
 
-func Import(ctx context.Context, db *sql.DB, dir, stripPrefix string, layer int) (int, error) {
-	return ImportWith(ctx, db, dir, ImportOptions{StripPrefix: stripPrefix, Layer: layer, Promote: true})
-}
-
 func ImportWith(ctx context.Context, db *sql.DB, dir string, o ImportOptions) (int, error) {
 	if _, err := New(db); err != nil {
 		return 0, err
 	}
-	stripPrefix, layer := o.StripPrefix, o.Layer
+	stripPrefix := o.StripPrefix
 	var result struct {
 		Encoder string `json:"encoder_sha256"`
+		Model   string `json:"model"`
+		Layer   *int   `json:"layer"`
 		Config  struct {
 			Width int `json:"width"`
 			TopK  int `json:"top_k"`
@@ -327,6 +369,10 @@ func ImportWith(ctx context.Context, db *sql.DB, dir string, o ImportOptions) (i
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return 0, fmt.Errorf("result.json: %w", err)
+	}
+	ident, err := resolveIdentity(result.Model, result.Layer, o)
+	if err != nil {
+		return 0, err
 	}
 	var names namesFile
 	if raw, err := os.ReadFile(filepath.Join(dir, "names.json")); err == nil {
@@ -362,7 +408,7 @@ func ImportWith(ctx context.Context, db *sql.DB, dir string, o ImportOptions) (i
 	}
 	defer tx.Rollback()
 	enc := result.Encoder
-	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO sae_encoders(encoder,width,top_k,layer,imported_at,current,label) VALUES(?,?,?,?,?,0,?)`, enc, result.Config.Width, result.Config.TopK, layer, time.Now().Unix(), o.Label); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO sae_encoders(encoder,width,top_k,layer,imported_at,current,label,model) VALUES(?,?,?,?,?,0,?,?)`, enc, result.Config.Width, result.Config.TopK, ident.Layer, time.Now().Unix(), o.Label, ident.Model); err != nil {
 		return 0, err
 	}
 	for _, n := range names.Names {

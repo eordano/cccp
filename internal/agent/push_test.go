@@ -210,6 +210,76 @@ func TestPush_LogChunkPartialFailureKeepsProgress(t *testing.T) {
 	}
 }
 
+func TestPush_OwnSpaceForgetsSharedSpace(t *testing.T) {
+	discardLogs(t)
+	t.Setenv("HOME", t.TempDir())
+	url, st := newBackendStore(t, "tok")
+	root := newClientRoot(t)
+	writeFile(t, root, "config.yaml", "model: apiary/auto\n")
+	writeFile(t, root, "SOUL.md", "default soul\n")
+	writeFile(t, root, "transcripts/.backfill.json", `{"sessions":{}}`)
+	writeFile(t, root, "transcripts/s1.jsonl", "{\"type\":\"user\",\"n\":1}\n{\"type\":\"assistant\",\"n\":2}\n")
+	ctx := context.Background()
+
+	shared, err := New(root, url, "tok", "hermes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Push(ctx, shared, nil, 0, false); err != nil {
+		t.Fatalf("shared push: %v", err)
+	}
+
+	own, err := New(root, url, "tok", "hermes-buzz-fizz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if own.Prefix != "agent/hermes-buzz-fizz/" || own.HostID != shared.HostID {
+		t.Fatalf("own space: prefix %q host %q (shared host %q)", own.Prefix, own.HostID, shared.HostID)
+	}
+	res, err := Push(ctx, own, nil, 0, false)
+	if err != nil {
+		t.Fatalf("own push: %v", err)
+	}
+	if res.BlobsDeleted != 0 {
+		t.Errorf("BlobsDeleted = %d: moving to an own space must not tombstone the shared space", res.BlobsDeleted)
+	}
+	if res.BlobsCommitted != 1 || res.LogLinesNew != 2 {
+		t.Errorf("own push committed %d blobs and %d new lines, want 1 and 2 (the whole tree again)", res.BlobsCommitted, res.LogLinesNew)
+	}
+	for _, p := range []string{"SOUL.md"} {
+		for _, prefix := range []string{"agent/hermes/", "agent/hermes-buzz-fizz/"} {
+			fv, err := st.LatestVersion(ctx, prefix+p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fv == nil || fv.ContentSHA == nil || fv.Version != 1 {
+				t.Errorf("%s%s: latest %+v, want one live version", prefix, p, fv)
+			}
+		}
+	}
+	state, err := LoadState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range state.KnownPushedBlobPaths {
+		if !strings.HasPrefix(p, "agent/hermes-buzz-fizz/") {
+			t.Errorf("state still knows %q outside the own space", p)
+		}
+	}
+	for p := range state.LogOffsets {
+		if !strings.HasPrefix(p, "agent/hermes-buzz-fizz/") {
+			t.Errorf("state still has a log offset for %q", p)
+		}
+	}
+	again, err := Push(ctx, own, nil, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.BlobsDeleted != 0 || again.BlobsCommitted != 0 || again.LogLinesNew != 0 {
+		t.Errorf("steady state push: %+v", again)
+	}
+}
+
 func TestPush_CleanSucceeds(t *testing.T) {
 	discardLogs(t)
 	url := newBackend(t, "tok")

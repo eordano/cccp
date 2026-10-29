@@ -209,6 +209,7 @@ func buildEnv(sess *Session) *sessionEnv {
 	var reported *costState
 	lastModel, lastEffort := "", ""
 	var lastUsage *RawEvent
+	seenMsg := map[string]bool{}
 	for _, e := range sess.Events {
 		switch e.Type {
 		case "assistant":
@@ -217,6 +218,10 @@ func buildEnv(sess *Session) *sessionEnv {
 					lastModel, lastEffort = e.Message.Model, e.Effort
 					env.Models = append(env.Models, modelSpan{Model: lastModel, Effort: lastEffort, Index: rawIndex[e]})
 				}
+				if e.Message.ID != "" && seenMsg[e.Message.ID] {
+					break
+				}
+				seenMsg[e.Message.ID] = true
 				if len(env.Models) > 0 && e.Message.Usage != nil {
 					env.Models[len(env.Models)-1].Turns++
 				}

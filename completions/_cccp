@@ -12,6 +12,7 @@ _cccp() {
         'pull:Pull remote state to local disk'
         'watch:Watch ~/.claude and sync on change'
         'explore:Browse local sessions as rich timelines'
+        'index:Rebuild, update or inspect the server session index'
         'host-id:Print this host'"'"'s persistent UUID'
         'help:Show usage'
     )
@@ -82,6 +83,11 @@ _cccp() {
                     ;;
                 serve|host-id)
                     _arguments $common_flags
+                    ;;
+                index)
+                    _arguments $common_flags \
+                        '--fresh[start over even when a rebuild is in progress]' \
+                        '1:index command:(rebuild update status)'
                     ;;
                 help)
                     ;;

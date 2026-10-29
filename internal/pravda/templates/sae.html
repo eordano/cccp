@@ -12,10 +12,25 @@
 <html lang="en"><head><meta charset="utf-8"><title>pravda · SAE features</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/sae.css"><link rel="stylesheet" href="/loading.css"><script src="/loading.js" defer></script><meta name="viewport" content="width=device-width, initial-scale=1"></head>
 <body class="sae-page"><main class="sae-main">
 <nav><a href="/">pravda</a> / <a href="/sae/settings?encoder={{ .Encoder }}">SAE settings and status</a></nav>
-<h1>SAE features <span class="dim">encoder {{ printf "%.12s" .Encoder }} · {{ .Total }} records · votes 👍{{ .Up }} 👎{{ .Down }}</span></h1>
-<table class="sae-table"><thead><tr><th>#</th><th>name</th><th>stance</th><th>records</th><th>share</th><th title="Confidence assigned to the feature name, separate from message activation">label confidence</th><th>👍</th><th>👎</th></tr></thead><tbody>
-{{ range .Rows }}<tr><td class="mono">{{ .Feature.Feature }}</td><td title="{{ .Description }}">{{ if .Name }}{{ .Name }}{{ else }}<span class="dim">unnamed</span>{{ end }}</td><td class="dim">{{ .Stance }}</td><td class="mono">{{ .Count }}</td><td class="mono">{{ printf "%.1f" .Share }}%</td><td class="mono">{{ if .Confidence }}{{ .Confidence }}{{ end }}</td><td class="mono">{{ if .Up }}{{ .Up }}{{ end }}</td><td class="mono">{{ if .Down }}{{ .Down }}{{ end }}</td></tr>
+<h1>SAE features <span class="dim">encoder {{ printf "%.12s" .Encoder }}{{ if .Model }} · {{ .Model }} layer {{ .Layer }}{{ end }} · {{ .Total }} records · votes 👍{{ .Up }} 👎{{ .Down }}</span></h1>
+<table class="sae-table"><thead><tr>{{ template "sae-sort-th" (dict "h" (index .Sort "feature") "label" "#") }}<th>name</th><th>stance</th>{{ template "sae-sort-th" (dict "h" (index .Sort "count") "label" "records") }}<th>share</th><th title="Confidence assigned to the feature name, separate from message activation">label confidence</th>{{ template "sae-sort-th" (dict "h" (index .Sort "up") "label" "👍" "title" "Voted messages with this feature, net thumbs up") }}{{ template "sae-sort-th" (dict "h" (index .Sort "down") "label" "👎" "title" "Voted messages with this feature, net thumbs down") }}{{ template "sae-sort-th" (dict "h" (index .Sort "ratio") "label" "👍 ratio" "title" "Thumbs-up share of the voted messages with this feature") }}</tr></thead><tbody>
+{{ range .Rows }}<tr><td class="mono">{{ .Feature.Feature }}</td><td title="{{ .Description }}"><a href="/sae/feature/{{ .Feature.Feature }}?encoder={{ $.Encoder }}">{{ if .Name }}{{ .Name }}{{ else }}<span class="dim">unnamed</span>{{ end }}</a></td><td class="dim">{{ .Stance }}</td><td class="mono">{{ .Count }}</td><td class="mono">{{ printf "%.1f" .Share }}%</td><td class="mono">{{ if .Confidence }}{{ .Confidence }}{{ end }}</td><td class="mono">{{ if .Votes.Up }}{{ .Votes.Up }}{{ end }}</td><td class="mono">{{ if .Votes.Down }}{{ .Votes.Down }}{{ end }}</td><td class="mono">{{ .Votes.RatioText }}</td></tr>
 {{ end }}</tbody></table></main></body></html>{{ end }}
+
+{{ define "sae-sort-th" }}<th{{ if .title }} title="{{ .title }}"{{ end }}><a href="{{ .h.URL }}">{{ .label }}{{ .h.Arrow }}</a></th>{{ end }}
+
+{{ define "sae-feature-page" }}<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>pravda · SAE feature {{ .Feature.Feature }}</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/sae.css"><link rel="stylesheet" href="/loading.css"><script src="/loading.js" defer></script><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body class="sae-page"><main class="sae-main">
+<nav><a href="/">pravda</a> / <a href="/sae/features?encoder={{ .Encoder }}">SAE features</a></nav>
+<h1>{{ if .Feature.Name }}{{ .Feature.Name }}{{ else }}Feature {{ .Feature.Feature }}{{ end }} <span class="dim">#{{ .Feature.Feature }} · encoder {{ printf "%.12s" .Encoder }}{{ if .Model }} · {{ .Model }} layer {{ .Layer }}{{ end }}</span></h1>
+{{ if .Feature.Description }}<p>{{ .Feature.Description }}</p>{{ end }}
+<p class="dim">{{ .Records }} records · voted messages 👍{{ .Votes.Up }} 👎{{ .Votes.Down }} · 👍 ratio {{ .Votes.RatioText }}{{ if .Feature.Stance }} · stance {{ .Feature.Stance }}{{ end }}</p>
+<h2>Messages with feedback</h2>
+{{ if .Feedback }}<table class="sae-table"><thead><tr><th>when</th><th>vote</th><th>activation</th><th>kind</th><th>message</th><th>note</th></tr></thead><tbody>
+{{ range .Feedback }}<tr><td class="mono">{{ .When }}</td><td>{{ if gt .Vote 0 }}👍{{ else }}👎{{ end }}</td><td class="mono">{{ .Pct }}%</td><td class="dim">{{ .Kind }}</td><td><a href="/session/{{ .Path }}?event={{ .Entry }}&amp;encoder={{ $.Encoder }}">{{ .Snippet }}</a><div class="dim">{{ .Path }} · event {{ .Entry }}{{ if .Who }} · {{ .Who }}{{ end }}</div></td><td>{{ .Note }}</td></tr>
+{{ end }}</tbody></table>{{ else }}<p class="dim">No feedback on messages where this feature is active in this dictionary.</p>{{ end }}
+</main></body></html>{{ end }}
 
 {{ define "sae-similar-page" }}<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><title>pravda · similar moments</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/sae.css"><link rel="stylesheet" href="/loading.css"><script src="/loading.js" defer></script><meta name="viewport" content="width=device-width, initial-scale=1"></head>
@@ -33,6 +48,6 @@
 <body class="sae-page"><main class="sae-main">
 <nav><a href="/">pravda</a> / <a href="/sae/settings">SAE settings and status</a></nav>
 <h1>SAE dictionaries <span class="dim">one per day over the last week of logs, one weekly over everything</span></h1>
-<table class="sae-table"><thead><tr><th>imported</th><th>label</th><th>width</th><th>top-k</th><th>layer</th><th>records</th><th>tagging</th><th>pages</th></tr></thead><tbody>
-{{ range .Encoders }}<tr><td class="mono">{{ .ImportedAt.Format "2006-01-02 15:04" }}</td><td>{{ if .Label }}{{ .Label }}{{ else }}<span class="dim">weekly</span>{{ end }}</td><td class="mono">{{ .Width }}</td><td class="mono">{{ .TopK }}</td><td class="mono">{{ .Layer }}</td><td class="mono">{{ .Records }}</td><td>{{ if .Current }}current{{ end }}</td><td><a href="/sae/features?encoder={{ .Encoder }}">features</a>{{ if .Label }} · <a href="/sae/daily/{{ .Label }}/sessions.html">sessions</a>{{ end }}</td></tr>
+<table class="sae-table"><thead><tr><th>imported</th><th>label</th><th>width</th><th>top-k</th><th>model</th><th>layer</th><th>records</th><th>tagging</th><th>pages</th></tr></thead><tbody>
+{{ range .Encoders }}<tr><td class="mono">{{ .ImportedAt.Format "2006-01-02 15:04" }}</td><td>{{ if .Label }}{{ .Label }}{{ else }}<span class="dim">weekly</span>{{ end }}</td><td class="mono">{{ .Width }}</td><td class="mono">{{ .TopK }}</td><td class="mono">{{ .Model }}</td><td class="mono">{{ .Layer }}</td><td class="mono">{{ .Records }}</td><td>{{ if .Current }}current{{ end }}</td><td><a href="/sae/features?encoder={{ .Encoder }}">features</a>{{ if .Label }} · <a href="/sae/daily/{{ .Label }}/sessions.html">sessions</a>{{ end }}</td></tr>
 {{ end }}</tbody></table></main></body></html>{{ end }}

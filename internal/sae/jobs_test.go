@@ -67,7 +67,7 @@ func testOnDemand(t *testing.T, handler http.HandlerFunc) (*OnDemand, string, *s
 	os.Mkdir(dir, 0700)
 	os.Rename(weight, filepath.Join(dir, "sae.safetensors"))
 	writeTestTensors(t, filepath.Join(dir, "scale.safetensors"), map[string][]float32{"scale": {10, 10, 20}}, map[string][]int{"scale": {3}})
-	_, err = db.Exec(`INSERT INTO sae_encoders VALUES (?,3,2,19,123,1,'original')`, enc)
+	_, err = db.Exec(`INSERT INTO sae_encoders(encoder,width,top_k,layer,imported_at,current,label,model) VALUES (?,3,2,19,123,1,'original','vendor/test-model')`, enc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func testOnDemand(t *testing.T, handler http.HandlerFunc) (*OnDemand, string, *s
 }
 func captureOK(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"layer":19,"hidden_size":2,"records":[{"tokens":2,"mean":[3,6]}]}`))
+	w.Write([]byte(`{"model":"vendor/test-model","layer":19,"num_layers":40,"hidden_size":2,"records":[{"tokens":2,"mean":[3,6]}]}`))
 }
 func recordFor(text string) Record {
 	return Record{ID: RecordID("user", text), Kind: "user", Agent: "claude", Path: "projects/test.jsonl", Line: 9}
@@ -90,11 +90,12 @@ func TestOnDemandUsesOriginalScaleAndPersistsWithoutChangingDictionary(t *testin
 	o, enc, db := testOnDemand(t, func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		var request struct {
+			Model string   `json:"model"`
 			Texts []string `json:"texts"`
 			Layer int      `json:"layer"`
 		}
 		json.NewDecoder(r.Body).Decode(&request)
-		if request.Layer != 19 || len(request.Texts) != 1 || request.Texts[0] != "one message" {
+		if r.URL.Path != "/v1/capture" || request.Model != "vendor/test-model" || request.Layer != 19 || len(request.Texts) != 1 || request.Texts[0] != "one message" {
 			t.Errorf("request: %+v", request)
 		}
 		captureOK(w, r)
@@ -216,7 +217,7 @@ func TestOnDemandRestartsInterruptedJob(t *testing.T) {
 }
 func TestOnDemandRejectsUnavailableWeightsAndBadCapture(t *testing.T) {
 	o, enc, _ := testOnDemand(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"layer":19,"hidden_size":1,"records":[{"tokens":2,"mean":[3]}]}`))
+		w.Write([]byte(`{"model":"vendor/test-model","layer":19,"hidden_size":1,"records":[{"tokens":2,"mean":[3]}]}`))
 	})
 	ctx := context.Background()
 	r := recordFor("dimension")

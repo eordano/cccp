@@ -17,31 +17,36 @@
       packages = forAll (pkgs: rec {
         cccp =
           let
-            binary = pkgs.buildGoModule {
+            binary = pkgs.buildGoLatestModule {
               pname = "cccp";
               version = "0.1.0";
               src = pkgs.lib.fileset.toSource {
                 root = ./.;
-                fileset = pkgs.lib.fileset.difference (pkgs.lib.fileset.unions [
-                  ./cmd
-                  ./internal
-                  ./go.mod
-                  ./go.sum
-                ]) (pkgs.lib.fileset.unions [
-                  ./internal/pravda/fixtures
-                  ./internal/pravda/testbrowser
-                  (pkgs.lib.fileset.fileFilter (f: pkgs.lib.hasSuffix "_test.go" f.name) ./internal)
-                ]);
+                fileset =
+                  pkgs.lib.fileset.difference
+                    (pkgs.lib.fileset.unions [
+                      ./cmd
+                      ./internal
+                      ./go.mod
+                      ./go.sum
+                    ])
+                    (
+                      pkgs.lib.fileset.unions [
+                        ./internal/pravda/fixtures
+                        ./internal/pravda/testbrowser
+                        (pkgs.lib.fileset.fileFilter (f: pkgs.lib.hasSuffix "_test.go" f.name) ./internal)
+                      ]
+                    );
               };
-              vendorHash = "sha256-bw8xkgO6KT0WkBfnejYm8FakVaPKlvBfMlDwLdRUzgo=";
+              vendorHash = "sha256-B4lpdmCwlnzn7FBifjuVxnKs9PeNjWcCTnve/sZefIQ=";
               subPackages = [ "cmd/cccp" ];
               env.CGO_ENABLED = 0;
 
               preBuild = ''
                 cp ${
                   pkgs.fetchurl {
-                    url = "https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js";
-                    hash = "sha256-4gndpcgjVHnzFm3vx3UOHbzVpcGAi3eS/C5nM3aPtEc=";
+                    url = "https://unpkg.com/htmx.org@2.0.11/dist/htmx.min.js";
+                    hash = "sha256-1v3HXyBOa976mbab8ebUrGm4o2T3eSn0XBNHa0AA9xc=";
                   }
                 } internal/pravda/public/htmx.min.js
                 chmod +w internal/pravda/public/htmx.min.js
@@ -76,7 +81,7 @@
       devShells = forAll (pkgs: {
         default = pkgs.mkShell {
           packages = [
-            pkgs.go
+            pkgs.go_latest
             pkgs.gopls
           ];
         };

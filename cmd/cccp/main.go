@@ -38,6 +38,13 @@ Usage:
   cccp explore [dir]    Browse local sessions as rich timelines (standalone
                         viewer, reads ~/.claude/projects/ by default).
   cccp host-id          Print this host's persistent UUID.
+  cccp review list|show|approve|reject
+                        Review agent-written knowledge files before other
+                        hosts apply them (see cccp review for usage).
+  cccp index rebuild    Rebuild the server's session index from the raw log
+                        (resumes an interrupted rebuild; --fresh starts over).
+  cccp index update     Fold log lines that arrived since the last run.
+  cccp index status     Print index generation, progress and row counts.
 
 Configuration (4 layers, later wins):
   defaults < config file < environment variables < CLI flags.
@@ -47,14 +54,20 @@ CLI flags (any subcommand):
   --agent NAME          agent profile (claude, codex, hermes, opencode, ...);
                         picks the default --dir and allowlist. Non-claude
                         agents ship under the wire prefix agent/<name>/.
+                        NAME-SPACE (e.g. hermes-buzz-fizz) is profile NAME
+                        in a space of its own, agent/NAME-SPACE/.
   --dir PATH            config root directory (default: the agent's home)
   --url, --server-url U server URL, e.g. https://host:12110
   --token TOKEN         bearer token
+  --token-file PATH     read the token from PATH when no token is set
+                        (config key token_file, env CCCP_TOKEN_FILE)
   --addr, --address A   listen address (default :12110)
   --port N              listen port; overrides the port in --addr
   --db, --database,
   --db-path PATH        sqlite database path (default <dir>/cccp/store.sqlite)
-  --config PATH         path to config file (default <dir>/cccp/config.json)
+  --config PATH         path to config file (default
+                        $XDG_CONFIG_HOME/cccp/<agent>.json when it exists,
+                        else <dir>/cccp/config.json)
 `
 
 func main() {
@@ -112,6 +125,14 @@ func main() {
 		}
 	case "explore":
 		if err := runExplore(ctx, os.Args[2:]); err != nil {
+			fail(err)
+		}
+	case "index":
+		if err := runIndex(ctx, os.Args[2:]); err != nil {
+			fail(err)
+		}
+	case "review":
+		if err := runReview(ctx, os.Args[2:]); err != nil {
 			fail(err)
 		}
 	case "sae":

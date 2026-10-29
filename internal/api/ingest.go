@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/eordano/cccp/internal/store"
+	"github.com/eordano/cccp/internal/syncclass"
 )
 
 type ManifestEntry struct {
@@ -18,6 +19,8 @@ type ManifestEntry struct {
 	Mode    uint32 `json:"mode"`
 	MtimeNS int64  `json:"mtime_ns"`
 }
+
+const resendWindow = 64
 
 type ingestResponse struct {
 	Need      []string `json:"need"`
@@ -86,6 +89,17 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 			resp.Skipped++
 			continue
 		}
+		if latest != nil && latest.ContentSHA != nil && !isDelete && latest.HostID != hostID {
+			own, found, err := s.Store.HostLatestSHA(ctx, e.Path, hostID, resendWindow)
+			if err != nil {
+				httpError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if found && own == e.SHA {
+				resp.Skipped++
+				continue
+			}
+		}
 		if latest != nil && latest.ContentSHA == nil && !isDelete && e.MtimeNS <= latest.IngestedAt {
 			resp.Skipped++
 			continue
@@ -110,6 +124,15 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		if err := s.Store.AppendVersion(ctx, fv); err != nil {
 			httpError(w, http.StatusInternalServerError, err.Error())
 			return
+		}
+		agentName := r.Header.Get("X-Agent")
+		if err := s.Store.PutVersionMeta(ctx, fv.Path, fv.Version, store.VersionMeta{
+			Agent: agentName, Sessions: r.Header.Get(HeaderSessions),
+		}); err != nil {
+			s.Log.Warn("ingest: version meta", "path", fv.Path, "err", err)
+		}
+		if fv.ContentSHA != nil && syncclass.Reviewable(fv.Path, fv.Mode) {
+			go s.runPrecheck(fv.Path, fv.Version, *fv.ContentSHA, hostID, agentName)
 		}
 		resp.Committed++
 	}

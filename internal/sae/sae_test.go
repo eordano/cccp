@@ -245,3 +245,64 @@ func TestBackfillFeatureIndex(t *testing.T) {
 		t.Fatalf("self match: %+v %v", got, err)
 	}
 }
+
+func TestImportTakesModelAndLayerFromResult(t *testing.T) {
+	ctx := context.Background()
+	st := openDB(t)
+	dir := t.TempDir()
+	writeRun(t, filepath.Join(dir, "legacy"), "encL", 3, 4)
+	writeRun(t, filepath.Join(dir, "new"), "encN", 3, 4)
+	os.WriteFile(filepath.Join(dir, "new", "result.json"), []byte(`{"encoder_sha256":"encN","model":"nvidia/Qwen3.8-Flash-Next-NVFP4","layer":0,"hidden_size":4096,"config":{"width":4,"top_k":3}}`), 0o644)
+	if _, err := ImportWith(ctx, st.DB(), filepath.Join(dir, "legacy"), ImportOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ImportWith(ctx, st.DB(), filepath.Join(dir, "new"), ImportOptions{Layer: 19}); err == nil {
+		t.Fatal("a layer flag that disagrees with result.json was accepted")
+	}
+	if _, err := ImportWith(ctx, st.DB(), filepath.Join(dir, "new"), ImportOptions{Model: LegacyModel}); err == nil {
+		t.Fatal("a model flag that disagrees with result.json was accepted")
+	}
+	if _, err := ImportWith(ctx, st.DB(), filepath.Join(dir, "new"), ImportOptions{Model: "nvidia/Qwen3.8-Flash-Next-NVFP4"}); err != nil {
+		t.Fatal(err)
+	}
+	ix, _ := New(st.DB())
+	encs, err := ix.EncoderCatalog(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]Encoder{}
+	for _, e := range encs {
+		got[e.Encoder] = e
+	}
+	if got["encL"].Model != LegacyModel || got["encL"].Layer != LegacyLayer {
+		t.Fatalf("legacy: %+v", got["encL"])
+	}
+	if got["encN"].Model != "nvidia/Qwen3.8-Flash-Next-NVFP4" || got["encN"].Layer != 0 {
+		t.Fatalf("new: %+v", got["encN"])
+	}
+}
+
+func TestMigrationBackfillsLagunaModel(t *testing.T) {
+	st := openDB(t)
+	db := st.DB()
+	if _, err := db.Exec(`CREATE TABLE sae_encoders (encoder TEXT PRIMARY KEY, width INTEGER NOT NULL, top_k INTEGER NOT NULL, layer INTEGER NOT NULL, imported_at INTEGER NOT NULL, current INTEGER NOT NULL DEFAULT 0) STRICT`); err != nil {
+		t.Fatal(err)
+	}
+	db.Exec(`INSERT INTO sae_encoders VALUES ('old',256,4,19,1,1)`)
+	ix, err := New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Exec(`INSERT INTO sae_encoders(encoder,width,top_k,layer,imported_at,model) VALUES ('later',8,2,30,2,'x/y')`)
+	if _, err := New(db); err != nil {
+		t.Fatal(err)
+	}
+	encs, _ := ix.EncoderCatalog(context.Background())
+	models := map[string]string{}
+	for _, e := range encs {
+		models[e.Encoder] = e.Model
+	}
+	if models["old"] != LegacyModel || models["later"] != "x/y" {
+		t.Fatalf("models: %v", models)
+	}
+}

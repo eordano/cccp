@@ -2,8 +2,6 @@ import importlib.util
 import json
 import os
 import sqlite3
-import sys
-import time
 import unittest
 from pathlib import Path
 
@@ -121,6 +119,8 @@ class BackfillCase:
         os.environ["HERMES_HOME"] = str(self.home)
         build_db(self.home, self.use_api)
         self.tdir = self.home / "transcripts"
+        self.stamp = self.home / "cccp" / plugin.BACKFILL_STAMP
+        self.legacy = self.home / "transcripts" / ".backfill.json"
         plugin._sessions.clear()
         self._cccp = plugin._cccp
         plugin._cccp = lambda *a, **k: None
@@ -140,11 +140,20 @@ class BackfillCase:
         self.assertEqual((st["sessions"], st["written"], st["empty"], st["active"]), (4, 2, 1, 1))
         files = sorted(p.name for p in self.tdir.glob("*.jsonl"))
         self.assertEqual(files, ["s_ended.jsonl", "s_stale_open.jsonl"])
-        self.assertTrue((self.tdir / plugin.BACKFILL_STAMP).is_file())
+        self.assertTrue(self.stamp.is_file())
+        self.assertEqual(sorted(p.name for p in self.tdir.iterdir() if not p.name.endswith(".jsonl")), [])
 
     def test_line_shape_matches_live_hooks(self):
         self.run_backfill()
         lines = read_lines(self.tdir / "s_ended.jsonl")
+        meta = lines.pop(0)
+        self.assertEqual((meta["type"], meta["agentSource"], meta["model"], meta["uuid"]),
+                         ("session-meta", "cli", "m1", plugin._det_uuid("s_ended", "", "meta")))
+        self.assertNotIn("parentSessionId", meta)
+        self.assertNotIn("gitCommit", meta)
+        self.assertIsNone(meta["parentUuid"])
+        self.assertEqual(lines[0]["parentUuid"], meta["uuid"])
+        lines[0]["parentUuid"] = None
         self.assertEqual([l["type"] for l in lines], ["model-change", "user", "assistant", "user", "assistant", "usage", "usage"])
         base = ["parentUuid", "isSidechain", "userType", "cwd", "sessionId", "version", "type", "uuid", "timestamp"]
         for l in lines:
@@ -229,6 +238,9 @@ class BackfillCase:
         plugin._post_llm_call(session_id=sid, assistant_response="ok", conversation_history=[], model="m2")
         plugin._sessions.clear()
         lines = read_lines(plugin._transcript_path(self.home, sid))
+        meta = lines.pop(0)
+        self.assertEqual((meta["type"], meta["sessionId"], meta["user"]), ("session-meta", sid, plugin._user()))
+        self.assertEqual(lines[0]["parentUuid"], meta["uuid"])
         self.assertEqual([l["type"] for l in lines],
                          ["model-change", "user", "usage", "assistant", "user", "model-change", "user", "assistant"])
         self.assertEqual([l["parentUuid"] for l in lines[1:]], [l["uuid"] for l in lines[:-1]])
@@ -244,6 +256,38 @@ class BackfillCase:
         self.assertNotIn("isMeta", lines[1])
         self.assertEqual(lines[7]["message"]["model"], "m2")
 
+    def test_live_session_meta_carries_source_parent_and_git(self):
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as repo:
+            subprocess.run(["git", "init", "-q", "-b", "feat", repo], check=True)
+            subprocess.run(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+            head = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+            old = os.getcwd()
+            os.chdir(repo)
+            try:
+                plugin._on_session_start(session_id="s_child", model="m1", platform="telegram", parent_session_id="s_root")
+                plugin._pre_llm_call(session_id="s_child", user_message="hi", conversation_history=[], model="m1")
+            finally:
+                os.chdir(old)
+        plugin._sessions.clear()
+        meta = read_lines(plugin._transcript_path(self.home, "s_child"))[0]
+        self.assertEqual((meta["type"], meta["agentSource"], meta["parentSessionId"], meta["gitBranch"], meta["gitCommit"]),
+                         ("session-meta", "telegram", "s_root", "feat", head))
+
+    def test_backfilled_child_names_its_parent(self):
+        if self.use_api:
+            self.skipTest("raw schema only")
+        conn = sqlite3.connect(self.home / "state.db")
+        conn.execute("INSERT INTO sessions(id, source, model, started_at, ended_at, cwd, parent_session_id) VALUES (?,?,?,?,?,?,?)",
+                     ("s_kid", "delegate", "m1", T0 + 30, T0 + 40, "/home/dev/proj", "s_ended"))
+        conn.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES (?,?,?,?)", ("s_kid", "user", "sub task", T0 + 31))
+        conn.commit()
+        conn.close()
+        self.run_backfill()
+        meta = read_lines(self.tdir / "s_kid.jsonl")[0]
+        self.assertEqual((meta["type"], meta["parentSessionId"], meta["agentSource"]), ("session-meta", "s_ended", "delegate"))
+
     def test_second_run_is_a_noop(self):
         self.run_backfill()
         before = {p.name: p.read_bytes() for p in self.tdir.glob("*.jsonl")}
@@ -254,10 +298,30 @@ class BackfillCase:
     def test_lost_stamp_dedupes_on_uuid(self):
         self.run_backfill()
         before = {p.name: p.read_bytes() for p in self.tdir.glob("*.jsonl")}
-        (self.tdir / plugin.BACKFILL_STAMP).unlink()
+        self.stamp.unlink()
         st = self.run_backfill()
         self.assertEqual(st["written"], 0)
         self.assertEqual({p.name: p.read_bytes() for p in self.tdir.glob("*.jsonl")}, before)
+
+    def test_legacy_stamp_carries_over_without_a_rebackfill(self):
+        self.run_backfill()
+        self.legacy.write_bytes(self.stamp.read_bytes())
+        self.stamp.unlink()
+        legacy = self.legacy.read_bytes()
+        before = {p.name: p.read_bytes() for p in self.tdir.glob("*.jsonl")}
+        st = self.run_backfill()
+        self.assertEqual((st["written"], st["lines"], st["skipped"]), (0, 0, 2))
+        self.assertEqual(json.loads(self.stamp.read_text())["sessions"], json.loads(legacy)["sessions"])
+        self.assertEqual(self.legacy.read_bytes(), legacy)
+        self.assertEqual({p.name: p.read_bytes() for p in self.tdir.glob("*.jsonl")}, before)
+        self.assertIn("2 sessions backfilled", plugin._slash("status"))
+
+    def test_legacy_stamp_is_read_once(self):
+        self.run_backfill()
+        mine = json.loads(self.stamp.read_text())["sessions"]
+        self.legacy.write_text(json.dumps({"version": 1, "sessions": {"elsewhere": {"skip": "live"}}}))
+        self.run_backfill()
+        self.assertEqual(json.loads(self.stamp.read_text())["sessions"], mine)
 
     def test_new_messages_append_incrementally(self):
         self.run_backfill()
@@ -271,13 +335,13 @@ class BackfillCase:
         st = self.run_backfill()
         self.assertEqual((st["written"], st["lines"]), (1, 2))
         lines = read_lines(self.tdir / "s_ended.jsonl")
-        self.assertEqual(len(lines), 9)
-        self.assertEqual(lines[7]["parentUuid"], lines[6]["uuid"])
-        self.assertEqual(lines[8]["message"]["content"], [{"type": "text", "text": "done"}])
+        self.assertEqual(len(lines), 10)
+        self.assertEqual(lines[8]["parentUuid"], lines[7]["uuid"])
+        self.assertEqual(lines[9]["message"]["content"], [{"type": "text", "text": "done"}])
         conn = sqlite3.connect(self.home / "state.db")
         last_id = conn.execute("SELECT MAX(id) FROM messages WHERE session_id = 's_ended'").fetchone()[0]
         conn.close()
-        stamp = json.loads((self.tdir / plugin.BACKFILL_STAMP).read_text())
+        stamp = json.loads(self.stamp.read_text())
         self.assertEqual(stamp["sessions"]["s_ended"]["last_id"], last_id)
         self.assertEqual(stamp["sessions"]["s_ended"]["size"], (self.tdir / "s_ended.jsonl").stat().st_size)
 
@@ -289,7 +353,7 @@ class BackfillCase:
         st = self.run_backfill()
         self.assertEqual(st["foreign"], 1)
         self.assertEqual(s.path.read_bytes(), before)
-        stamp = json.loads((self.tdir / plugin.BACKFILL_STAMP).read_text())
+        stamp = json.loads(self.stamp.read_text())
         self.assertEqual(stamp["sessions"]["s_ended"], {"skip": "live"})
         st = self.run_backfill()
         self.assertEqual(s.path.read_bytes(), before)
@@ -297,7 +361,7 @@ class BackfillCase:
     def test_sessions_owned_by_live_hooks_are_skipped(self):
         plugin._session("s_ended", "m1")
         st = self.run_backfill()
-        self.assertEqual([l["type"] for l in read_lines(self.tdir / "s_ended.jsonl")], ["model-change"])
+        self.assertEqual([l["type"] for l in read_lines(self.tdir / "s_ended.jsonl")], ["session-meta", "model-change"])
         self.assertEqual(st["written"], 1)
 
     def test_budget_resumes_next_run(self):
@@ -312,8 +376,8 @@ class BackfillCase:
 
     def test_lock_skips_concurrent_run(self):
         import fcntl
-        self.tdir.mkdir(parents=True, exist_ok=True)
-        fh = open(self.tdir / plugin.BACKFILL_LOCK, "a+")
+        self.stamp.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(self.stamp.parent / plugin.BACKFILL_LOCK, "a+")
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
             st = self.run_backfill()

@@ -65,16 +65,20 @@ func (s *Server) handleSaeImport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	layer, _ := strconv.Atoi(r.FormValue("layer"))
-	if layer == 0 {
-		layer = 19
+	var layer int
+	if v := r.FormValue("layer"); v != "" {
+		var err error
+		if layer, err = strconv.Atoi(v); err != nil || layer < 0 {
+			http.Error(w, "bad layer", http.StatusBadRequest)
+			return
+		}
 	}
 	label := r.FormValue("label")
 	if label != "" && !saeLabelRe.MatchString(label) {
 		http.Error(w, "bad label", http.StatusBadRequest)
 		return
 	}
-	n, err := sae.ImportWith(r.Context(), s.Store.DB(), dir, sae.ImportOptions{StripPrefix: r.FormValue("strip"), Layer: layer, Label: label, Promote: r.FormValue("current") == "1" || label == ""})
+	n, err := sae.ImportWith(r.Context(), s.Store.DB(), dir, sae.ImportOptions{StripPrefix: r.FormValue("strip"), Model: r.FormValue("model"), Layer: layer, Label: label, Promote: r.FormValue("current") == "1" || label == ""})
 	if err != nil {
 		http.Error(w, "import: "+err.Error(), http.StatusBadRequest)
 		return

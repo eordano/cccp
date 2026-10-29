@@ -29,7 +29,7 @@ func saeTestServer(t *testing.T) (*WatchServer, *sql.DB) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.Exec(`INSERT INTO sae_encoders VALUES ('old',2,2,1,1,0,'old'),('new',2,2,1,2,1,'new')`)
+	_, err = db.Exec(`INSERT INTO sae_encoders(encoder,width,top_k,layer,imported_at,current,label,model) VALUES ('old',2,2,1,1,0,'old','vendor/old'),('new',2,2,1,2,1,'new','vendor/new')`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,6 +52,9 @@ func TestSaePayloadKeepsMissingAndLowValues(t *testing.T) {
 	}
 	if len(p.Features) != 2 || p.Features[0].Count != 1 {
 		t.Fatalf("catalog: %+v", p.Features)
+	}
+	if p.Dictionary.Model != "vendor/new" || p.Dictionary.Layer != 1 {
+		t.Fatalf("dictionary identity: %+v", p.Dictionary)
 	}
 	data := s.decorateSae(context.Background(), sess, "new")
 	setSaeSession(data, "dir/a?#.jsonl")
@@ -126,10 +129,7 @@ func TestSaeDictionaryRedirectUpdatesExplicitEncoder(t *testing.T) {
 
 func TestSaeSessionRenderingKeepsDictionaryOutOfCachedEntries(t *testing.T) {
 	indexed, db := saeTestServer(t)
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "demo.jsonl"), []byte(`{"type":"assistant","uuid":"one","message":{"role":"assistant","content":[{"type":"text","text":"example"}]}}`), 0600); err != nil {
-		t.Fatal(err)
-	}
+	dir := demoSessionDir(t)
 	id := sae.RecordID("assistant", "example")
 	if _, err := db.Exec(`INSERT INTO sae_records VALUES ('new',?,'assistant','claude','h','s','','demo.jsonl',1,'example','[{"f":0,"p":80}]',0)`, id); err != nil {
 		t.Fatal(err)
@@ -158,10 +158,7 @@ func TestSaeSessionRenderingKeepsDictionaryOutOfCachedEntries(t *testing.T) {
 
 func TestSaeEventInspectorShowsAllImportedActivations(t *testing.T) {
 	indexed, db := saeTestServer(t)
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "demo.jsonl"), []byte(`{"type":"assistant","uuid":"one","message":{"role":"assistant","content":[{"type":"text","text":"example"}]}}`), 0600); err != nil {
-		t.Fatal(err)
-	}
+	dir := demoSessionDir(t)
 	id := sae.RecordID("assistant", "example")
 	if _, err := db.Exec(`INSERT INTO sae_records VALUES ('new',?,'assistant','claude','h','s','','demo.jsonl',1,'example','[{"f":0,"p":80},{"f":1,"p":12}]',0)`, id); err != nil {
 		t.Fatal(err)
@@ -306,10 +303,7 @@ func TestSaeRenderingQueuesOutsideVisibleWindow(t *testing.T) {
 
 func TestSaeEventInspectorQueuesAndRefreshesPersistedResult(t *testing.T) {
 	indexed, db := saeTestServer(t)
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "demo.jsonl"), []byte(`{"type":"assistant","uuid":"one","message":{"role":"assistant","content":[{"type":"text","text":"example"}]}}`), 0600); err != nil {
-		t.Fatal(err)
-	}
+	dir := demoSessionDir(t)
 	s := NewWatchServer(NewFSStore(dir))
 	s.Sae = indexed.Sae
 	executor := &fakeSaeExecutor{supported: true, jobs: map[string]sae.JobState{}}
@@ -459,4 +453,13 @@ func TestSaeQueueFullWaitsButUnavailableStops(t *testing.T) {
 	if p.Status.Poll || p.Status.Unavailable != 1 {
 		t.Fatalf("terminal unavailable: %+v", p.Status)
 	}
+}
+
+func demoSessionDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "demo.jsonl"), []byte(`{"type":"assistant","uuid":"one","message":{"role":"assistant","content":[{"type":"text","text":"example"}]}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }

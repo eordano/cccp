@@ -165,14 +165,7 @@ func TestScanLine_AWSExample_Skipped(t *testing.T) {
 		`aws_access_key_id = AKIAIOSFODNN7EXAMPLE`,
 		`aws_secret = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`,
 	}
-	for _, line := range cases {
-		ff := ScanLine("test.txt", line, 1)
-		for _, f := range ff {
-			if f.Kind == "aws_access_key" {
-				t.Errorf("unexpected aws_access_key finding for example %q: %v", line, f)
-			}
-		}
-	}
+	assertNoKind(t, "aws_access_key", cases)
 }
 
 func TestScanLine_PrivateKey(t *testing.T) {
@@ -208,14 +201,7 @@ func TestScanLine_ConnectionString_TemplateSkipped(t *testing.T) {
 		`url = "postgres://{{user}}:{{pass}}@host/db"`,
 		`url = "postgres://" + user + ":" + process.env.DB_PASS + "@host/db"`,
 	}
-	for _, line := range cases {
-		ff := ScanLine("test.txt", line, 1)
-		for _, f := range ff {
-			if f.Kind == "connection_string" {
-				t.Errorf("unexpected connection_string finding for %q: %v", line, f)
-			}
-		}
-	}
+	assertNoKind(t, "connection_string", cases)
 }
 
 func TestScanLine_Bearer(t *testing.T) {
@@ -237,14 +223,7 @@ func TestScanLine_Bearer_ExampleSkipped(t *testing.T) {
 		`Bearer your-api-token-goes-here`,
 		`Bearer <YOUR_TOKEN_HERE_PLEASE>`,
 	}
-	for _, line := range cases {
-		ff := ScanLine("test.txt", line, 1)
-		for _, f := range ff {
-			if f.Kind == "bearer" {
-				t.Errorf("unexpected bearer finding for %q: %v", line, f)
-			}
-		}
-	}
+	assertNoKind(t, "bearer", cases)
 }
 
 func TestScanLine_KeyValue(t *testing.T) {
@@ -276,14 +255,7 @@ func TestScanLine_KeyValue_DictionarySkipped(t *testing.T) {
 		`SECRET=undefined`,
 		`api_key: example`,
 	}
-	for _, line := range cases {
-		ff := ScanLine("test.txt", line, 1)
-		for _, f := range ff {
-			if f.Kind == "key_value" {
-				t.Errorf("unexpected key_value finding for %q: %v", line, f)
-			}
-		}
-	}
+	assertNoKind(t, "key_value", cases)
 }
 
 func TestScanLine_AnthropicKey_Regression(t *testing.T) {
@@ -336,14 +308,7 @@ func TestScanLine_SafeHex(t *testing.T) {
 		`ref abc123def456abc123def456abc123def456abc123def4`,
 		`mac 0123456789abcdef0123456789abcdef`,
 	}
-	for _, line := range cases {
-		ff := ScanLine("test.txt", line, 1)
-		for _, f := range ff {
-			if f.Kind == "hex_token" {
-				t.Errorf("unexpected hex_token finding for %q: %v", line, f)
-			}
-		}
-	}
+	assertNoKind(t, "hex_token", cases)
 }
 
 func TestScanLine_LongHex(t *testing.T) {
@@ -559,6 +524,17 @@ func TestWindowsMatchWholeLineOnShortInput(t *testing.T) {
 		want := p.re.FindAllStringSubmatchIndex(short, -1)
 		if len(got) != len(want) {
 			t.Fatalf("%s: windowed %v vs direct %v", p.kind, got, want)
+		}
+	}
+}
+
+func assertNoKind(t *testing.T, kind string, cases []string) {
+	t.Helper()
+	for _, line := range cases {
+		for _, f := range ScanLine("test.txt", line, 1) {
+			if f.Kind == kind {
+				t.Errorf("unexpected %s finding for %q: %v", kind, line, f)
+			}
 		}
 	}
 }

@@ -102,6 +102,7 @@ type RawEvent struct {
 }
 
 type Message struct {
+	ID      string          `json:"id"`
 	Role    string          `json:"role"`
 	Model   string          `json:"model"`
 	Content json.RawMessage `json:"content"`

@@ -9,6 +9,7 @@ complete -c cccp -n __fish_use_subcommand -a push    -d "Ship local state to the
 complete -c cccp -n __fish_use_subcommand -a pull    -d "Pull remote state to local disk"
 complete -c cccp -n __fish_use_subcommand -a watch   -d "Watch ~/.claude and sync on change"
 complete -c cccp -n __fish_use_subcommand -a explore -d "Browse local sessions as rich timelines"
+complete -c cccp -n __fish_use_subcommand -a index   -d "Rebuild, update or inspect the server's session index"
 complete -c cccp -n __fish_use_subcommand -a host-id -d "Print this host's persistent UUID"
 complete -c cccp -n __fish_use_subcommand -a help    -d "Show usage"
 
@@ -34,6 +35,10 @@ complete -c cccp -n "__fish_seen_subcommand_from pull" -l full -d "Bootstrap (re
 # push-only flag.
 complete -c cccp -n "__fish_seen_subcommand_from push" -l cheka-allow -r -d "Tolerate up to N secret findings (-1 disables)"
 complete -c cccp -n "__fish_seen_subcommand_from push" -l cheka-redact -d "Redact secrets in log files instead of blocking"
+
+# index subcommands and flags.
+complete -c cccp -n "__fish_seen_subcommand_from index; and not __fish_seen_subcommand_from rebuild update status" -a "rebuild update status"
+complete -c cccp -n "__fish_seen_subcommand_from rebuild" -l fresh -d "Start over even when a rebuild is in progress"
 
 # explore-only flags.
 complete -c cccp -n "__fish_seen_subcommand_from explore" -s p -l port -r -d "HTTP port (default 9123)"

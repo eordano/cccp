@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"strings"
+
+	"github.com/eordano/cccp/internal/syncclass"
 )
 
 type Converter func(line []byte) [][]byte
@@ -27,7 +29,7 @@ func isListedSession(path string) bool {
 	if a == "" {
 		return true
 	}
-	keep := sessionFilters[a]
+	keep := sessionFilters[syncclass.Kind(a)]
 	if keep == nil {
 		return true
 	}
@@ -45,8 +47,12 @@ func agentOf(path string) string {
 	return ""
 }
 
+func converterFor(path string) Converter {
+	return converters[syncclass.Kind(agentOf(path))]
+}
+
 func convertReader(path string, rc io.ReadCloser) (io.ReadCloser, error) {
-	c := converters[agentOf(path)]
+	c := converterFor(path)
 	if c == nil {
 		return rc, nil
 	}
@@ -101,7 +107,7 @@ func (s convertingStore) SessionLines(ctx context.Context, path string, after in
 	if err != nil {
 		return nil, 0, err
 	}
-	c := converters[agentOf(path)]
+	c := converterFor(path)
 	if c == nil {
 		return lines, cursor, nil
 	}

@@ -245,8 +245,9 @@ func (o *OnDemand) runOne(ctx context.Context) bool {
 	if err == nil && existing != nil {
 		err = o.complete(ctx, j, existing.Features)
 	} else if err == nil {
+		var model string
 		var layer, width, k int
-		err = o.ix.db.QueryRowContext(ctx, `SELECT layer,width,top_k FROM sae_encoders WHERE encoder=?`, j.enc).Scan(&layer, &width, &k)
+		err = o.ix.db.QueryRowContext(ctx, `SELECT model,layer,width,top_k FROM sae_encoders WHERE encoder=?`, j.enc).Scan(&model, &layer, &width, &k)
 		if err == nil && o.modelID != j.enc {
 			o.modelID = ""
 			o.model, err = loadCPUEncoder(o.cfg.ModelsDir, j.enc)
@@ -259,7 +260,7 @@ func (o *OnDemand) runOne(ctx context.Context) bool {
 		}
 		if err == nil {
 			var mean []float32
-			mean, err = o.capture(ctx, j.text, layer)
+			mean, err = o.capture(ctx, j.text, captureTarget{Encoder: j.enc, Model: model, Layer: layer, Hidden: o.model.hidden})
 			if err == nil {
 				var acts []Activation
 				acts, err = o.model.score(mean)
@@ -273,7 +274,8 @@ func (o *OnDemand) runOne(ctx context.Context) bool {
 		slog.Info("SAE scoring completed", "encoder", j.enc, "record_id", j.id, "attempt", j.attempts, "duration_ms", time.Since(started).Milliseconds())
 		return true
 	}
-	// Only fixed messages and HTTP status codes may enter durable state or logs.
+	// Only fixed messages, HTTP status codes and dictionary/model identifiers may
+	// enter durable state or logs.
 	message, retryable := scoringFailure(err)
 	var retry int64
 	if retryable {
@@ -300,6 +302,10 @@ func scoringBackoff(attempts int) time.Duration {
 }
 
 func scoringFailure(err error) (string, bool) {
+	var mismatch *captureMismatchError
+	if errors.As(err, &mismatch) {
+		return mismatch.Error(), false
+	}
 	var captureErr *captureHTTPError
 	if errors.As(err, &captureErr) {
 		status := captureErr.Status

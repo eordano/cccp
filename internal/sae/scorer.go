@@ -160,19 +160,47 @@ type capturedMean struct {
 	Parts  int       `json:"-"`
 }
 
-func (o *OnDemand) capture(ctx context.Context, text string, layer int) ([]float32, error) {
+type captureTarget struct {
+	Encoder string
+	Model   string
+	Layer   int
+	Hidden  int
+}
+
+func (t captureTarget) describe() string {
+	return fmt.Sprintf("Dictionary %.12s belongs to %s layer %d", t.Encoder, t.Model, t.Layer)
+}
+
+type captureMismatchError struct{ msg string }
+
+func (e *captureMismatchError) Error() string { return e.msg }
+
+func cleanModelID(id string) string {
+	if id == "" || len(id) > 128 {
+		return "an unnamed model"
+	}
+	for _, c := range id {
+		ok := c == '.' || c == '_' || c == '-' || c == '/' || c == ':' || c == '@' || c == '+' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		if !ok {
+			return "an unnamed model"
+		}
+	}
+	return id
+}
+
+func (o *OnDemand) capture(ctx context.Context, text string, t captureTarget) ([]float32, error) {
 	if len(text) > MaxCaptureBytes || !utf8.ValidString(text) {
 		return nil, errors.New("invalid capture text")
 	}
-	result, err := o.captureText(ctx, text, layer)
+	result, err := o.captureText(ctx, text, t)
 	if err == nil && result.Parts > 1 {
 		slog.Info("SAE capture chunked", "bytes", len(text), "chunks", result.Parts, "tokens", result.Tokens)
 	}
 	return result.Mean, err
 }
 
-func (o *OnDemand) captureText(ctx context.Context, text string, layer int) (capturedMean, error) {
-	result, err := o.capturePart(ctx, text, layer)
+func (o *OnDemand) captureText(ctx context.Context, text string, t captureTarget) (capturedMean, error) {
+	result, err := o.capturePart(ctx, text, t)
 	var failure *captureHTTPError
 	if !errors.As(err, &failure) || failure.Status != http.StatusBadRequest || failure.Message != "context limit" {
 		return result, err
@@ -184,11 +212,11 @@ func (o *OnDemand) captureText(ctx context.Context, text string, layer int) (cap
 	if mid == 0 || mid == len(text) {
 		return capturedMean{}, err
 	}
-	left, err := o.captureText(ctx, text[:mid], layer)
+	left, err := o.captureText(ctx, text[:mid], t)
 	if err != nil {
 		return capturedMean{}, err
 	}
-	right, err := o.captureText(ctx, text[mid:], layer)
+	right, err := o.captureText(ctx, text[mid:], t)
 	if err != nil {
 		return capturedMean{}, err
 	}
@@ -204,44 +232,115 @@ func (o *OnDemand) captureText(ctx context.Context, text string, layer int) (cap
 	return left, nil
 }
 
-func (o *OnDemand) capturePart(ctx context.Context, text string, layer int) (capturedMean, error) {
-	body, _ := json.Marshal(struct {
-		Layer      int      `json:"layer"`
-		Texts      []string `json:"texts"`
-		Tokens     bool     `json:"tokens"`
-		MaxContext int      `json:"max_context"`
-	}{layer, []string{text}, false, 2048})
-	req, err := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(o.cfg.CaptureURL, "/")+"/v1/laguna/capture", bytes.NewReader(body))
+func (o *OnDemand) servedModels(ctx context.Context) string {
+	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(o.cfg.CaptureURL, "/")+"/v1/capture", nil)
 	if err != nil {
-		return capturedMean{}, errors.New("invalid capture endpoint")
+		return ""
+	}
+	resp, err := o.client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Models []struct {
+			Model   string `json:"model"`
+			Capture bool   `json:"capture"`
+		} `json:"models"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&body) != nil {
+		return ""
+	}
+	var ids []string
+	for _, m := range body.Models {
+		if m.Capture && len(ids) < 8 {
+			ids = append(ids, cleanModelID(m.Model))
+		}
+	}
+	return strings.Join(ids, ", ")
+}
+
+func (o *OnDemand) postCapture(ctx context.Context, route string, body []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(o.cfg.CaptureURL, "/")+route, bytes.NewReader(body))
+	if err != nil {
+		return nil, errors.New("invalid capture endpoint")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := o.client.Do(req)
 	if err != nil {
-		return capturedMean{}, errors.New("capture service unavailable")
+		return nil, errors.New("capture service unavailable")
+	}
+	return resp, nil
+}
+
+type captureFailure struct {
+	err          error
+	routeMissing bool
+}
+
+func (o *OnDemand) captureFailure(ctx context.Context, resp *http.Response, t captureTarget) captureFailure {
+	var body struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	_ = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&body)
+	switch {
+	case resp.StatusCode == http.StatusNotFound && body.Error.Type == "model_not_found":
+		msg := t.describe() + "; the capture engine does not serve that model"
+		if served := o.servedModels(ctx); served != "" {
+			msg += " (it serves " + served + ")"
+		}
+		return captureFailure{err: &captureMismatchError{msg + "."}}
+	case resp.StatusCode == http.StatusNotImplemented:
+		return captureFailure{err: &captureMismatchError{t.describe() + "; the capture engine serving it cannot capture layers (HTTP 501)."}}
+	}
+	out := &captureHTTPError{Status: resp.StatusCode}
+	if resp.StatusCode == http.StatusBadRequest && body.Error.Message == "each input must hold 1..=2048 tokens" {
+		out.Message = "context limit"
+	}
+	return captureFailure{err: out, routeMissing: resp.StatusCode == http.StatusNotFound && body.Error.Type == ""}
+}
+
+func (o *OnDemand) capturePart(ctx context.Context, text string, t captureTarget) (capturedMean, error) {
+	body, _ := json.Marshal(struct {
+		Model      string   `json:"model"`
+		Layer      int      `json:"layer"`
+		Texts      []string `json:"texts"`
+		Tokens     bool     `json:"tokens"`
+		MaxContext int      `json:"max_context"`
+	}{t.Model, t.Layer, []string{text}, false, 2048})
+	var resp *http.Response
+	for _, route := range []string{"/v1/capture", "/v1/laguna/capture"} {
+		var err error
+		if resp, err = o.postCapture(ctx, route, body); err != nil {
+			return capturedMean{}, err
+		}
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+		failure := o.captureFailure(ctx, resp, t)
+		resp.Body.Close()
+		if !failure.routeMissing || route != "/v1/capture" {
+			return capturedMean{}, failure.err
+		}
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		failure := &captureHTTPError{Status: resp.StatusCode}
-		if resp.StatusCode == http.StatusBadRequest {
-			var body struct {
-				Error struct {
-					Message string `json:"message"`
-				} `json:"error"`
-			}
-			if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&body) == nil && body.Error.Message == "each input must hold 1..=2048 tokens" {
-				failure.Message = "context limit"
-			}
-		}
-		return capturedMean{}, failure
-	}
 	var result struct {
+		Model   string         `json:"model"`
 		Layer   int            `json:"layer"`
 		Hidden  int            `json:"hidden_size"`
 		Records []capturedMean `json:"records"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&result); err != nil || result.Layer != layer || len(result.Records) != 1 || result.Hidden < 1 || result.Hidden != len(result.Records[0].Mean) || result.Records[0].Tokens < 1 {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&result); err != nil || result.Layer != t.Layer || len(result.Records) != 1 || result.Hidden < 1 || result.Hidden != len(result.Records[0].Mean) || result.Records[0].Tokens < 1 {
 		return capturedMean{}, errors.New("invalid capture response")
+	}
+	if result.Model != t.Model {
+		return capturedMean{}, &captureMismatchError{fmt.Sprintf("%s; the capture engine answered with %s.", t.describe(), cleanModelID(result.Model))}
+	}
+	if result.Hidden != t.Hidden {
+		return capturedMean{}, &captureMismatchError{fmt.Sprintf("%s with hidden size %d; the capture engine returned hidden size %d.", t.describe(), t.Hidden, result.Hidden)}
 	}
 	for _, v := range result.Records[0].Mean {
 		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {

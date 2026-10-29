@@ -8,6 +8,20 @@ import (
 	"testing"
 )
 
+func mustPush(t *testing.T, ctx context.Context, c *Config) {
+	t.Helper()
+	if _, err := Push(ctx, c, DefaultAllowlist, 0, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustPull(t *testing.T, ctx context.Context, c *Config, full bool) {
+	t.Helper()
+	if _, err := Pull(ctx, c, full); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func readFile(t *testing.T, root, rel string) string {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(root, rel))
@@ -28,17 +42,13 @@ func TestPull_EmptySnapshotDoesNotDeleteLocalFiles(t *testing.T) {
 	url := newBackend(t, "tok")
 	rootA := newClientRoot(t)
 	rootB := newClientRoot(t)
-	writeFile(t, rootA, "memory/notes.md", "keep me")
-	writeFile(t, rootA, "CLAUDE.md", "keep me too")
+	writeFile(t, rootA, "plans/notes.md", "keep me")
+	writeFile(t, rootA, "tasks/t.json", "keep me too")
 	a := newPushClient(t, url, "tok", rootA)
-	if _, err := Push(ctx, a, DefaultAllowlist, 0, false); err != nil {
-		t.Fatal(err)
-	}
+	mustPush(t, ctx, a)
 	b := newPushClient(t, url, "tok", rootB)
-	if _, err := Pull(ctx, b, false); err != nil {
-		t.Fatal(err)
-	}
-	if !exists(rootB, "memory/notes.md") || !exists(rootB, "CLAUDE.md") {
+	mustPull(t, ctx, b, false)
+	if !exists(rootB, "plans/notes.md") || !exists(rootB, "tasks/t.json") {
 		t.Fatal("pull did not materialize files on B")
 	}
 
@@ -51,7 +61,7 @@ func TestPull_EmptySnapshotDoesNotDeleteLocalFiles(t *testing.T) {
 	if res.TarRemoved != 0 {
 		t.Errorf("TarRemoved = %d, want 0", res.TarRemoved)
 	}
-	if !exists(rootB, "memory/notes.md") || !exists(rootB, "CLAUDE.md") {
+	if !exists(rootB, "plans/notes.md") || !exists(rootB, "tasks/t.json") {
 		t.Error("empty server snapshot deleted previously pulled local files")
 	}
 
@@ -70,25 +80,19 @@ func TestPull_TombstoneKeepsLocallyModifiedFile(t *testing.T) {
 	url := newBackend(t, "tok")
 	rootA := newClientRoot(t)
 	rootB := newClientRoot(t)
-	writeFile(t, rootA, "skills/foo.md", "original")
-	writeFile(t, rootA, "skills/keep.md", "stays")
+	writeFile(t, rootA, "plans/foo.md", "original")
+	writeFile(t, rootA, "plans/keep.md", "stays")
 	a := newPushClient(t, url, "tok", rootA)
-	if _, err := Push(ctx, a, DefaultAllowlist, 0, false); err != nil {
-		t.Fatal(err)
-	}
+	mustPush(t, ctx, a)
 	b := newPushClient(t, url, "tok", rootB)
-	if _, err := Pull(ctx, b, false); err != nil {
-		t.Fatal(err)
-	}
+	mustPull(t, ctx, b, false)
 
-	if err := os.Remove(filepath.Join(rootA, "skills/foo.md")); err != nil {
+	if err := os.Remove(filepath.Join(rootA, "plans/foo.md")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Push(ctx, a, DefaultAllowlist, 0, false); err != nil {
-		t.Fatal(err)
-	}
+	mustPush(t, ctx, a)
 
-	writeFile(t, rootB, "skills/foo.md", "local edit, never pushed")
+	writeFile(t, rootB, "plans/foo.md", "local edit, never pushed")
 	res, err := Pull(ctx, b, false)
 	if err != nil {
 		t.Fatal(err)
@@ -96,7 +100,7 @@ func TestPull_TombstoneKeepsLocallyModifiedFile(t *testing.T) {
 	if res.TarRemoved != 0 {
 		t.Errorf("TarRemoved = %d, want 0", res.TarRemoved)
 	}
-	if got := readFile(t, rootB, "skills/foo.md"); got != "local edit, never pushed" {
+	if got := readFile(t, rootB, "plans/foo.md"); got != "local edit, never pushed" {
 		t.Errorf("locally modified file was destroyed by tombstone; content = %q", got)
 	}
 }
@@ -107,23 +111,17 @@ func TestPull_TombstoneRemovesUnmodifiedFile(t *testing.T) {
 	url := newBackend(t, "tok")
 	rootA := newClientRoot(t)
 	rootB := newClientRoot(t)
-	writeFile(t, rootA, "skills/foo.md", "original")
-	writeFile(t, rootA, "skills/keep.md", "stays")
+	writeFile(t, rootA, "plans/foo.md", "original")
+	writeFile(t, rootA, "plans/keep.md", "stays")
 	a := newPushClient(t, url, "tok", rootA)
-	if _, err := Push(ctx, a, DefaultAllowlist, 0, false); err != nil {
-		t.Fatal(err)
-	}
+	mustPush(t, ctx, a)
 	b := newPushClient(t, url, "tok", rootB)
-	if _, err := Pull(ctx, b, false); err != nil {
-		t.Fatal(err)
-	}
+	mustPull(t, ctx, b, false)
 
-	if err := os.Remove(filepath.Join(rootA, "skills/foo.md")); err != nil {
+	if err := os.Remove(filepath.Join(rootA, "plans/foo.md")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Push(ctx, a, DefaultAllowlist, 0, false); err != nil {
-		t.Fatal(err)
-	}
+	mustPush(t, ctx, a)
 
 	res, err := Pull(ctx, b, false)
 	if err != nil {
@@ -132,10 +130,10 @@ func TestPull_TombstoneRemovesUnmodifiedFile(t *testing.T) {
 	if res.TarRemoved != 1 {
 		t.Errorf("TarRemoved = %d, want 1", res.TarRemoved)
 	}
-	if exists(rootB, "skills/foo.md") {
+	if exists(rootB, "plans/foo.md") {
 		t.Error("unmodified tombstoned file should have been removed")
 	}
-	if !exists(rootB, "skills/keep.md") {
+	if !exists(rootB, "plans/keep.md") {
 		t.Error("live file should remain")
 	}
 }
@@ -147,9 +145,7 @@ func TestPull_FullPreservesUnpushedLogLinesAndResetsOffset(t *testing.T) {
 	root := newClientRoot(t)
 	writeFile(t, root, "history.jsonl", `{"n":1}`+"\n"+`{"n":2}`+"\n")
 	c := newPushClient(t, url, "tok", root)
-	if _, err := Push(ctx, c, DefaultAllowlist, 0, false); err != nil {
-		t.Fatal(err)
-	}
+	mustPush(t, ctx, c)
 
 	f, err := os.OpenFile(filepath.Join(root, "history.jsonl"), os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -160,9 +156,7 @@ func TestPull_FullPreservesUnpushedLogLinesAndResetsOffset(t *testing.T) {
 	}
 	f.Close()
 
-	if _, err := Pull(ctx, c, true); err != nil {
-		t.Fatal(err)
-	}
+	mustPull(t, ctx, c, true)
 	content := readFile(t, root, "history.jsonl")
 	if !strings.Contains(content, `{"n":3,"local":true}`) {
 		t.Fatalf("pull --full destroyed unpushed local line; content:\n%s", content)
@@ -228,17 +222,15 @@ func TestPush_DanglingSymlinkSkippedWithoutTombstone(t *testing.T) {
 	ctx := context.Background()
 	url := newBackend(t, "tok")
 	rootA := newClientRoot(t)
-	writeFile(t, rootA, "skills/a.md", "aaa")
-	writeFile(t, rootA, "skills/b.md", "bbb")
+	writeFile(t, rootA, "plans/a.md", "aaa")
+	writeFile(t, rootA, "plans/b.md", "bbb")
 	a := newPushClient(t, url, "tok", rootA)
-	if _, err := Push(ctx, a, DefaultAllowlist, 0, false); err != nil {
-		t.Fatal(err)
-	}
+	mustPush(t, ctx, a)
 
-	if err := os.Remove(filepath.Join(rootA, "skills/b.md")); err != nil {
+	if err := os.Remove(filepath.Join(rootA, "plans/b.md")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("/nonexistent/target", filepath.Join(rootA, "skills/b.md")); err != nil {
+	if err := os.Symlink("/nonexistent/target", filepath.Join(rootA, "plans/b.md")); err != nil {
 		t.Fatal(err)
 	}
 	res, err := Push(ctx, a, DefaultAllowlist, 0, false)
@@ -251,10 +243,8 @@ func TestPush_DanglingSymlinkSkippedWithoutTombstone(t *testing.T) {
 
 	rootB := newClientRoot(t)
 	b := newPushClient(t, url, "tok", rootB)
-	if _, err := Pull(ctx, b, false); err != nil {
-		t.Fatal(err)
-	}
-	if got := readFile(t, rootB, "skills/b.md"); got != "bbb" {
+	mustPull(t, ctx, b, false)
+	if got := readFile(t, rootB, "plans/b.md"); got != "bbb" {
 		t.Errorf("server content for b.md = %q, want %q", got, "bbb")
 	}
 }
@@ -265,36 +255,26 @@ func TestPush_StaleManifestDoesNotResurrectTombstone(t *testing.T) {
 	url := newBackend(t, "tok")
 	rootA := newClientRoot(t)
 	rootB := newClientRoot(t)
-	writeFile(t, rootA, "commands/x.md", "delete me")
-	writeFile(t, rootA, "memory/keep.md", "v1")
+	writeFile(t, rootA, "plans/x.md", "delete me")
+	writeFile(t, rootA, "plans/keep.md", "v1")
 	a := newPushClient(t, url, "tok", rootA)
-	if _, err := Push(ctx, a, DefaultAllowlist, 0, false); err != nil {
-		t.Fatal(err)
-	}
+	mustPush(t, ctx, a)
 	b := newPushClient(t, url, "tok", rootB)
-	if _, err := Pull(ctx, b, false); err != nil {
-		t.Fatal(err)
-	}
+	mustPull(t, ctx, b, false)
 
-	if err := os.Remove(filepath.Join(rootA, "commands/x.md")); err != nil {
+	if err := os.Remove(filepath.Join(rootA, "plans/x.md")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Push(ctx, a, DefaultAllowlist, 0, false); err != nil {
-		t.Fatal(err)
-	}
+	mustPush(t, ctx, a)
 
-	writeFile(t, rootB, "memory/keep.md", "v2 from B")
-	if _, err := Push(ctx, b, DefaultAllowlist, 0, false); err != nil {
-		t.Fatal(err)
-	}
+	writeFile(t, rootB, "plans/keep.md", "v2 from B")
+	mustPush(t, ctx, b)
 
-	if _, err := Pull(ctx, a, false); err != nil {
-		t.Fatal(err)
-	}
-	if exists(rootA, "commands/x.md") {
+	mustPull(t, ctx, a, false)
+	if exists(rootA, "plans/x.md") {
 		t.Error("deleted file resurrected by stale push from host that had not pulled the tombstone")
 	}
-	if got := readFile(t, rootA, "memory/keep.md"); got != "v2 from B" {
+	if got := readFile(t, rootA, "plans/keep.md"); got != "v2 from B" {
 		t.Errorf("keep.md = %q, want %q (live edits still propagate)", got, "v2 from B")
 	}
 }

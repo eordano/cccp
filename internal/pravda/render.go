@@ -37,6 +37,7 @@ func init() {
 		"truncate":       truncate,
 		"shortID":        shortID,
 		"agentName":      agentDisplayName,
+		"agentKind":      agentKind,
 		"parentSession":  parentSessionOf,
 		"toolPreview":    toolPreview,
 		"dict":           dict,
@@ -330,6 +331,7 @@ type pageData struct {
 	GroupBy     string
 	Groups      []*sidebarGroup
 	Preset      string
+	Files       *filesPage
 }
 
 type agentCount struct {
@@ -358,12 +360,6 @@ type fileInfo struct {
 	Folder     string
 	ParentPath string
 	Facts      *sessionFacts
-}
-
-type folderNode struct {
-	Folder   string
-	Label    string
-	Sessions []*sessionGroup
 }
 
 type sessionGroup struct {

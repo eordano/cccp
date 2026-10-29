@@ -16,9 +16,11 @@
         <h3>SAE activations{{ if .Dictionary }} · {{ .Dictionary }}{{ end }}</h3>
         <div class="sae-workbench"{{ if .JSON }} data-sae="{{ .JSON }}" data-sae-event="{{ .Index }}"{{ end }}>
           <p>{{ .Detail }}</p>
-          {{ if .Tags }}<table class="sae-table"><thead><tr><th>Feature</th><th>Scaled activation</th></tr></thead><tbody>{{ range .Tags }}<tr><td title="{{ .Desc }}"><a href="/sae/similar/{{ .ID }}?encoder={{ .Encoder }}">{{ .Name }}</a></td><td>{{ .Pct }}%</td></tr>{{ end }}</tbody></table>{{ end }}
           <a href="{{ .SettingsURL }}">SAE settings and status</a>
         </div>
+        {{ if .Tags }}<table class="sae-table" aria-label="Activations and feedback by feature"><thead><tr>{{ template "sae-sort-th" (dict "h" (index .Sort "feature") "label" "Feature") }}{{ template "sae-sort-th" (dict "h" (index .Sort "pct") "label" "Scaled activation") }}{{ template "sae-sort-th" (dict "h" (index .Sort "up") "label" "👍" "title" "Voted messages with this feature in this dictionary, net thumbs up") }}{{ template "sae-sort-th" (dict "h" (index .Sort "down") "label" "👎" "title" "Voted messages with this feature in this dictionary, net thumbs down") }}{{ template "sae-sort-th" (dict "h" (index .Sort "ratio") "label" "👍 ratio") }}</tr></thead><tbody>{{ range .Tags }}<tr><td title="{{ .Desc }}"><a href="/sae/feature/{{ .Feature }}?encoder={{ .Encoder }}">{{ .Name }}</a></td><td>{{ .Pct }}%</td><td class="mono">{{ .Votes.Up }}</td><td class="mono">{{ .Votes.Down }}</td><td class="mono">{{ .Votes.RatioText }}</td></tr>{{ end }}</tbody></table>
+        {{ if .NoVotes }}<p class="dim">Feedback counts could not be read.</p>{{ end }}
+        <a href="/sae/similar/{{ (index .Tags 0).ID }}?encoder={{ (index .Tags 0).Encoder }}">Find similar moments</a>{{ end }}
       </section>
       {{ end }}
       <section>

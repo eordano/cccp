@@ -6,11 +6,20 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/eordano/cccp/internal/syncclass"
 )
 
 func (s *Server) handleCurrent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	entries, err := s.Store.CurrentSnapshot(ctx)
+	gated := r.Header.Get(syncclass.GateHeader) == "1"
+	var entries []snapEntry
+	var err error
+	if gated {
+		entries, err = s.gatedSnapshot(ctx)
+	} else {
+		entries, err = s.legacySnapshot(ctx)
+	}
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -19,6 +28,20 @@ func (s *Server) handleCurrent(w http.ResponseWriter, r *http.Request) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	for _, e := range entries {
+		if e.Deleted {
+			if err := tw.WriteHeader(&tar.Header{
+				Name:       e.Path,
+				Mode:       int64(e.Mode & 0o7777),
+				ModTime:    time.Unix(0, e.MtimeNS),
+				Typeflag:   tar.TypeReg,
+				Format:     tar.FormatPAX,
+				PAXRecords: map[string]string{syncclass.PAXDeleted: "1"},
+			}); err != nil {
+				httpError(w, http.StatusInternalServerError, "tar header: "+err.Error())
+				return
+			}
+			continue
+		}
 		body, err := s.Store.GetBlob(ctx, e.ContentSHA)
 		if err != nil {
 			s.Log.Error("snapshot blob missing", "path", e.Path, "sha", e.ContentSHA, "err", err)
@@ -47,6 +70,9 @@ func (s *Server) handleCurrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if gated {
+		w.Header().Set(syncclass.GateHeader, "1")
+	}
 	w.Header().Set("Content-Type", "application/x-tar")
 	w.Header().Set("Content-Disposition", `attachment; filename="current.tar"`)
 	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
@@ -54,5 +80,6 @@ func (s *Server) handleCurrent(w http.ResponseWriter, r *http.Request) {
 	s.Log.Info("current snapshot",
 		"host", r.Header.Get(HeaderHostID),
 		"files", len(entries),
+		"gated", gated,
 		"bytes", buf.Len())
 }

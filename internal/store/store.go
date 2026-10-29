@@ -133,6 +133,22 @@ func (s *Store) LatestVersion(ctx context.Context, path string) (*FileVersion, e
 	return &fv, nil
 }
 
+func (s *Store) HostLatestSHA(ctx context.Context, path, hostID string, window int) (string, bool, error) {
+	var sha sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+		SELECT content_sha FROM (
+			SELECT version, host_id, content_sha FROM file_versions
+			WHERE path = ? ORDER BY version DESC LIMIT ?
+		) WHERE host_id = ? ORDER BY version DESC LIMIT 1`, path, window, hostID).Scan(&sha)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return sha.String, true, nil
+}
+
 func (s *Store) AppendVersion(ctx context.Context, fv FileVersion) error {
 	var sha any
 	if fv.ContentSHA != nil {

@@ -1,0 +1,7 @@
+# Reviewed, intentionally public guard hits. One ERE per line, matched against
+# `path:line:text` (path relative to the export root).
+
+# cheka (the secret scanner) unit tests: fabricated key shapes and AWS's
+# documented example key, used to prove detection/redaction.
+^internal/cheka/cheka_test\.go:[0-9]+:.*AKIA(QX3SJOD7WPXK5QWZ|IOSFODNN7EXAMPLE|ABCDEFGHIJKLMNOP)
+^internal/cheka/cheka_test\.go:[0-9]+:.*`-----BEGIN RSA PRIVATE[ ]KEY-----`

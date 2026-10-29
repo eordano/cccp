@@ -12,7 +12,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 )
 
 type liveHub struct {
@@ -235,18 +235,19 @@ func (s *WatchServer) handleLiveWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing path", http.StatusBadRequest)
 		return
 	}
-	conn, err := s.upgrader.Upgrade(w, r, nil)
+	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		log.Println("live upgrade:", err)
 		return
 	}
+	conn.SetReadLimit(-1)
 	s.live.add(rel, conn)
 	defer func() {
 		s.live.remove(rel, conn)
-		conn.Close()
+		conn.CloseNow()
 	}()
 	for {
-		if _, _, err := conn.ReadMessage(); err != nil {
+		if _, _, err := conn.Read(r.Context()); err != nil {
 			return
 		}
 	}
@@ -286,13 +287,13 @@ func (s *WatchServer) broadcastLive(rel string) {
 	}
 	var dead []*websocket.Conn
 	for _, c := range subs {
-		if err := c.WriteMessage(websocket.TextMessage, payload); err != nil {
+		if err := c.Write(context.Background(), websocket.MessageText, payload); err != nil {
 			dead = append(dead, c)
 		}
 	}
 	for _, c := range dead {
 		s.live.remove(rel, c)
-		c.Close()
+		c.CloseNow()
 	}
 }
 

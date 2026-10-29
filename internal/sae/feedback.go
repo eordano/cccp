@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"time"
 )
@@ -72,27 +73,6 @@ func (ix *Index) VotesByPath(ctx context.Context, path string) (map[int]int, err
 	return out, rows.Err()
 }
 
-func (ix *Index) VotesByRecord(ctx context.Context) (map[string]int, error) {
-	if err := ensureFeedback(ix.db); err != nil {
-		return nil, err
-	}
-	rows, err := ix.db.QueryContext(ctx, `SELECT record_id, vote FROM feedback`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string]int{}
-	for rows.Next() {
-		var id string
-		var v int
-		if err := rows.Scan(&id, &v); err != nil {
-			return nil, err
-		}
-		out[id] = v
-	}
-	return out, rows.Err()
-}
-
 func (ix *Index) ExportFeedback(ctx context.Context, w io.Writer) (int, error) {
 	if err := ensureFeedback(ix.db); err != nil {
 		return 0, err
@@ -118,41 +98,88 @@ func (ix *Index) ExportFeedback(ctx context.Context, w io.Writer) (int, error) {
 }
 
 type FeatureVotes struct {
-	Up   int
-	Down int
+	Up   int `json:"up"`
+	Down int `json:"down"`
 }
 
+func (v FeatureVotes) Ratio() float64 {
+	if v.Up+v.Down == 0 {
+		return -1
+	}
+	return float64(v.Up) / float64(v.Up+v.Down)
+}
+
+func (v FeatureVotes) RatioText() string {
+	r := v.Ratio()
+	if r < 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%.0f%%", r*100)
+}
+
+const netVotes = `WITH votes AS (SELECT record_id AS id, SUM(vote) AS net FROM feedback GROUP BY record_id HAVING net <> 0)`
+
 func (ix *Index) FeatureVoteStats(ctx context.Context, enc string) (map[int]FeatureVotes, int, int, error) {
-	votes, err := ix.VotesByRecord(ctx)
-	if err != nil || len(votes) == 0 {
+	if err := ensureFeedback(ix.db); err != nil {
 		return nil, 0, 0, err
 	}
-	ids := make([]string, 0, len(votes))
-	for id := range votes {
-		ids = append(ids, id)
-	}
-	recs, err := ix.ByIDs(ctx, enc, ids)
+	rows, err := ix.db.QueryContext(ctx, netVotes+`
+SELECT CAST(json_extract(j.value,'$.f') AS INTEGER) AS feature, SUM(v.net > 0), SUM(v.net < 0)
+FROM votes v JOIN sae_records r ON r.encoder=? AND r.id=v.id, json_each(r.features) j
+GROUP BY feature`, enc)
 	if err != nil {
 		return nil, 0, 0, err
 	}
+	defer rows.Close()
 	out := map[int]FeatureVotes{}
-	up, down := 0, 0
-	for id, r := range recs {
-		v := votes[id]
-		if v > 0 {
-			up++
-		} else if v < 0 {
-			down++
+	for rows.Next() {
+		var f int
+		var v FeatureVotes
+		if err := rows.Scan(&f, &v.Up, &v.Down); err != nil {
+			return nil, 0, 0, err
 		}
-		for _, a := range r.Features {
-			fv := out[a.Feature]
-			if v > 0 {
-				fv.Up++
-			} else if v < 0 {
-				fv.Down++
-			}
-			out[a.Feature] = fv
-		}
+		out[f] = v
 	}
-	return out, up, down, nil
+	if err := rows.Err(); err != nil {
+		return nil, 0, 0, err
+	}
+	var up, down int
+	err = ix.db.QueryRowContext(ctx, netVotes+`
+SELECT COALESCE(SUM(v.net > 0),0), COALESCE(SUM(v.net < 0),0) FROM votes v JOIN sae_records r ON r.encoder=? AND r.id=v.id`, enc).Scan(&up, &down)
+	return out, up, down, err
+}
+
+type FeatureFeedback struct {
+	Feedback
+	Snippet string
+	Pct     int
+}
+
+func (f FeatureFeedback) When() string { return time.Unix(f.At, 0).UTC().Format("2006-01-02 15:04") }
+
+func (ix *Index) FeedbackForFeature(ctx context.Context, enc string, feature, limit int) ([]FeatureFeedback, error) {
+	if err := ensureFeedback(ix.db); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := ix.db.QueryContext(ctx, `
+SELECT v.path, v.entry, v.record_id, v.kind, v.vote, v.note, v.who, v.at, r.snippet, CAST(json_extract(j.value,'$.p') AS INTEGER)
+FROM feedback v JOIN sae_records r ON r.encoder=? AND r.id=v.record_id, json_each(r.features) j
+WHERE json_extract(j.value,'$.f') = ?
+ORDER BY v.at DESC, v.path, v.entry LIMIT ?`, enc, feature, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []FeatureFeedback
+	for rows.Next() {
+		var f FeatureFeedback
+		if err := rows.Scan(&f.Path, &f.Entry, &f.RecordID, &f.Kind, &f.Vote, &f.Note, &f.Who, &f.At, &f.Snippet, &f.Pct); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
 }

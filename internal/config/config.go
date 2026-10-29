@@ -21,6 +21,9 @@ type Resolved struct {
 	Dir            string
 	URL            string
 	Token          string
+	TokenFile      string
+	TokenFileErr   error
+	TokenFromFile  bool
 	Addr           string
 	DB             string
 	DebounceMS     int
@@ -29,6 +32,7 @@ type Resolved struct {
 	ChekaRedactSet bool
 	PushOnly       bool
 	PushToken      string
+	ReadTokenFile  string
 	Allowlist      []string
 	Source         string
 }
@@ -36,30 +40,33 @@ type Resolved struct {
 type CLI struct {
 	agent                             string
 	dir, url, token, addr, db, config string
+	tokenFile                         string
 	port, debounceMs, chekaAllow      int
-	pushToken                         string
+	pushToken, readTokenFile          string
 	chekaRedact, pushOnly             bool
 
-	dirSet, urlSet, tokenSet                   bool
+	dirSet, urlSet, tokenSet, tokenFileSet     bool
 	addrSet, portSet, dbSet, cfgSet, debSet    bool
 	chekaAllowSet, chekaRedactSet, pushOnlySet bool
-	pushTokenSet, agentSet                     bool
+	pushTokenSet, agentSet, readTokenFileSet   bool
 }
 
 type fileShape struct {
-	Agent       *string  `json:"agent,omitempty"`
-	Dir         *string  `json:"dir,omitempty"`
-	URL         *string  `json:"url,omitempty"`
-	Token       *string  `json:"token,omitempty"`
-	Addr        *string  `json:"addr,omitempty"`
-	Port        *int     `json:"port,omitempty"`
-	DB          *string  `json:"db,omitempty"`
-	DebounceMs  *int     `json:"debounce_ms,omitempty"`
-	ChekaAllow  *int     `json:"cheka_allow,omitempty"`
-	ChekaRedact *bool    `json:"cheka_redact,omitempty"`
-	PushOnly    *bool    `json:"push_only,omitempty"`
-	PushToken   *string  `json:"push_token,omitempty"`
-	Allowlist   []string `json:"allowlist,omitempty"`
+	Agent         *string  `json:"agent,omitempty"`
+	Dir           *string  `json:"dir,omitempty"`
+	URL           *string  `json:"url,omitempty"`
+	Token         *string  `json:"token,omitempty"`
+	TokenFile     *string  `json:"token_file,omitempty"`
+	Addr          *string  `json:"addr,omitempty"`
+	Port          *int     `json:"port,omitempty"`
+	DB            *string  `json:"db,omitempty"`
+	DebounceMs    *int     `json:"debounce_ms,omitempty"`
+	ChekaAllow    *int     `json:"cheka_allow,omitempty"`
+	ChekaRedact   *bool    `json:"cheka_redact,omitempty"`
+	PushOnly      *bool    `json:"push_only,omitempty"`
+	PushToken     *string  `json:"push_token,omitempty"`
+	ReadTokenFile *string  `json:"read_token_file,omitempty"`
+	Allowlist     []string `json:"allowlist,omitempty"`
 }
 
 func RegisterFlags(fs *flag.FlagSet) *CLI {
@@ -69,6 +76,7 @@ func RegisterFlags(fs *flag.FlagSet) *CLI {
 	fs.StringVar(&c.url, "url", "", "server URL")
 	fs.StringVar(&c.url, "server-url", "", "alias for --url")
 	fs.StringVar(&c.token, "token", "", "bearer token")
+	fs.StringVar(&c.tokenFile, "token-file", "", "read the bearer token from this file when no token is set")
 	fs.StringVar(&c.addr, "addr", "", "listen address (default :12110)")
 	fs.StringVar(&c.addr, "address", "", "alias for --addr")
 	fs.IntVar(&c.port, "port", 0, "listen port; overrides the port in --addr")
@@ -80,6 +88,7 @@ func RegisterFlags(fs *flag.FlagSet) *CLI {
 	fs.BoolVar(&c.chekaRedact, "cheka-redact", false, "redact secrets in log files instead of blocking")
 	fs.BoolVar(&c.pushOnly, "push-only", false, "secretary: push local changes, never pull from the server")
 	fs.StringVar(&c.pushToken, "push-token", "", "serve: optional second token accepted only on the push endpoints")
+	fs.StringVar(&c.readTokenFile, "read-token-file", "", "serve: optional file holding a third token accepted only for GET/HEAD on read routes")
 	fs.StringVar(&c.config, "config", "", "path to config file")
 	return c
 }
@@ -90,6 +99,7 @@ func Resolve(fs *flag.FlagSet, c *CLI) (*Resolved, error) {
 	c.dirSet = seen["dir"]
 	c.urlSet = seen["url"] || seen["server-url"]
 	c.tokenSet = seen["token"]
+	c.tokenFileSet = seen["token-file"]
 	c.addrSet = seen["addr"] || seen["address"]
 	c.portSet = seen["port"]
 	c.dbSet = seen["db"] || seen["database"] || seen["db-path"]
@@ -98,6 +108,7 @@ func Resolve(fs *flag.FlagSet, c *CLI) (*Resolved, error) {
 	c.chekaRedactSet = seen["cheka-redact"]
 	c.pushOnlySet = seen["push-only"]
 	c.pushTokenSet = seen["push-token"]
+	c.readTokenFileSet = seen["read-token-file"]
 	c.cfgSet = seen["config"]
 	c.agentSet = seen["agent"]
 
@@ -119,6 +130,9 @@ func Resolve(fs *flag.FlagSet, c *CLI) (*Resolved, error) {
 		dirForCfg = c.dir
 	}
 	cfgPath := filepath.Join(dirForCfg, "cccp", "config.json")
+	if p := userConfigPath(home, agentName); p != "" {
+		cfgPath = p
+	}
 	envCfg, envCfgSet := os.LookupEnv("CCCP_CONFIG")
 	if envCfgSet {
 		cfgPath = envCfg
@@ -154,7 +168,18 @@ func Resolve(fs *flag.FlagSet, c *CLI) (*Resolved, error) {
 	r.Dir = resolveStr(defaultDir, file.Dir, envPtr("CCCP_DIR"), cliPtr(c.dir, c.dirSet))
 	r.URL = resolveStr("", file.URL, envPtr("CCCP_URL"), cliPtr(c.url, c.urlSet))
 	r.Token = resolveStr("", file.Token, envPtr("CCCP_TOKEN"), cliPtr(c.token, c.tokenSet))
+	r.TokenFile = resolveStr("", file.TokenFile, envPtr("CCCP_TOKEN_FILE"), cliPtr(c.tokenFile, c.tokenFileSet))
+	if r.Token == "" && r.TokenFile != "" {
+		b, err := os.ReadFile(r.TokenFile)
+		if err != nil {
+			r.TokenFileErr = err
+		} else {
+			r.Token = strings.TrimSpace(string(b))
+			r.TokenFromFile = true
+		}
+	}
 	r.PushToken = resolveStr("", file.PushToken, envPtr("CCCP_PUSH_TOKEN"), cliPtr(c.pushToken, c.pushTokenSet))
+	r.ReadTokenFile = resolveStr("", file.ReadTokenFile, envPtr("CCCP_READ_TOKEN_FILE"), cliPtr(c.readTokenFile, c.readTokenFileSet))
 	r.Addr = resolveStr(":12110", file.Addr, envPtr("CCCP_ADDR"), cliPtr(c.addr, c.addrSet))
 
 	if strings.HasPrefix(r.Addr, "http://") || strings.HasPrefix(r.Addr, "https://") {
@@ -209,10 +234,22 @@ func Resolve(fs *flag.FlagSet, c *CLI) (*Resolved, error) {
 	return r, nil
 }
 
+func userConfigPath(home, agentName string) string {
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" {
+		base = filepath.Join(home, ".config")
+	}
+	p := filepath.Join(base, "cccp", agentName+".json")
+	if _, err := os.Stat(p); err != nil {
+		return ""
+	}
+	return p
+}
+
 func agentDir(home, name string) (string, error) {
-	p, ok := agent.LookupProfile(name)
+	p, ok := agent.ResolveProfile(name)
 	if !ok {
-		return "", fmt.Errorf("unknown agent %q (known: %s)", name, strings.Join(agent.ProfileNames(), ", "))
+		return "", agent.UnknownAgentError(name)
 	}
 	return p.DefaultDir(home), nil
 }

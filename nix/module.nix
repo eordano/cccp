@@ -47,6 +47,17 @@ in
       description = "Directory of SAE weights and original calibration, keyed by encoder SHA256.";
     };
 
+    reviewPrecheck = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = ''
+        Command run on every proposed knowledge version (content on stdin,
+        CCCP_PATH/VERSION/SHA/HOST_ID/AGENT in the environment). Exit 0
+        records "pass", non-zero "flag"; the verdict annotates the review
+        queue and never approves.
+      '';
+    };
+
     tokenFile = lib.mkOption {
       type = lib.types.path;
       description = ''
@@ -65,6 +76,18 @@ in
         /log/append). Hosts holding it can ship their own state but
         cannot read anything back. Read via LoadCredential like
         tokenFile.
+      '';
+    };
+
+    readTokenFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = ''
+        Optional file containing a read-only bearer token: GET/HEAD on
+        the read routes only (API reads, review queue views, pravda and
+        SAE read pages), 403 on every write, review decision and login.
+        For automation that must never approve review-gate items. Read
+        via LoadCredential like tokenFile.
       '';
     };
 
@@ -96,7 +119,8 @@ in
         LoadCredential = [
           "token:${toString cfg.tokenFile}"
         ]
-        ++ lib.optional (cfg.pushTokenFile != null) "push-token:${toString cfg.pushTokenFile}";
+        ++ lib.optional (cfg.pushTokenFile != null) "push-token:${toString cfg.pushTokenFile}"
+        ++ lib.optional (cfg.readTokenFile != null) "read-token:${toString cfg.readTokenFile}";
         SyslogIdentifier = "cccp";
         ExecStart = ''
           ${pkgs.bash}/bin/bash -c 'CCCP_TOKEN="$(cat "$CREDENTIALS_DIRECTORY/token")" ${
@@ -107,6 +131,10 @@ in
             lib.optionalString (cfg.saeDir != null) " --sae-dir ${cfg.saeDir}"
           }${lib.optionalString (cfg.saeCaptureURL != null) " --sae-capture-url ${cfg.saeCaptureURL}"}${
             lib.optionalString (cfg.saeModelsDir != null) " --sae-models-dir ${cfg.saeModelsDir}"
+          }${lib.optionalString (cfg.reviewPrecheck != null) " --review-precheck ${cfg.reviewPrecheck}"}${
+            lib.optionalString (
+              cfg.readTokenFile != null
+            ) " --read-token-file \"$CREDENTIALS_DIRECTORY/read-token\""
           }'
         '';
         Restart = "on-failure";

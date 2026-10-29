@@ -101,7 +101,7 @@ func TestOpencodeRunNormalizes(t *testing.T) {
 
 func TestOpencodeSyntheticNormalizes(t *testing.T) {
 	sess := opencodeFixture(t, "opencode-synthetic.jsonl")
-	if got := extractTitleFromEvents(sess.Events); got != "say hi and list the dir" {
+	if got := extractTitleFromEvents(sess.Events); got != "harness" {
 		t.Errorf("title = %q", got)
 	}
 	kinds := checkRendered(t, sess)

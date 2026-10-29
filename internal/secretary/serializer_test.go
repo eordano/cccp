@@ -116,7 +116,7 @@ func TestSerializer_PullTriggerRunsPushFirstWhenDirty(t *testing.T) {
 	_, rootA, rootB, a, b := testSetup(t)
 	ctx := context.Background()
 
-	write(t, rootA, "memory/MEMORY.md", "server content")
+	write(t, rootA, "plans/plan.md", "server content")
 	if _, err := agent.Push(ctx, a, nil, 0, false); err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestSerializer_PullTriggerRunsPushFirstWhenDirty(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	write(t, rootB, "memory/MEMORY.md", "edit saved during debounce window")
+	write(t, rootB, "plans/plan.md", "edit saved during debounce window")
 
 	var localDirty atomic.Bool
 	localDirty.Store(true)
@@ -136,17 +136,17 @@ func TestSerializer_PullTriggerRunsPushFirstWhenDirty(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := agent.Pull(ctx, a, false); err == nil {
-			if read(t, rootA, "memory/MEMORY.md") == "edit saved during debounce window" {
+			if read(t, rootA, "plans/plan.md") == "edit saved during debounce window" {
 				break
 			}
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	if got := read(t, rootB, "memory/MEMORY.md"); got != "edit saved during debounce window" {
+	if got := read(t, rootB, "plans/plan.md"); got != "edit saved during debounce window" {
 		t.Errorf("SSE-triggered pull overwrote fresh local edit; content = %q", got)
 	}
-	if got := read(t, rootA, "memory/MEMORY.md"); got != "edit saved during debounce window" {
+	if got := read(t, rootA, "plans/plan.md"); got != "edit saved during debounce window" {
 		t.Errorf("edit was not pushed before pull; host A has %q", got)
 	}
 }

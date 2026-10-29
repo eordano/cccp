@@ -29,13 +29,14 @@ func runSae(ctx context.Context, args []string) error {
 		return runSaePrune(ctx, args[1:])
 	}
 	if len(args) == 0 || args[0] != "import" {
-		return fmt.Errorf("usage: cccp sae import --db PATH --dir RUN_DIR [--strip PREFIX] [--layer N]\n       cccp sae push --url URL --token TOKEN --dir RUN_DIR [--strip PREFIX] [--layer N]\n       cccp sae prune --db PATH [--keep-days 30] [--sae-dir DIR] [--yes]")
+		return fmt.Errorf("usage: cccp sae import --db PATH --dir RUN_DIR [--strip PREFIX] [--model ID] [--layer N]\n       cccp sae push --url URL --token TOKEN --dir RUN_DIR [--strip PREFIX] [--model ID] [--layer N]\n       cccp sae prune --db PATH [--keep-days 30] [--sae-dir DIR] [--yes]")
 	}
 	fs := flag.NewFlagSet("sae import", flag.ExitOnError)
 	db := fs.String("db", "", "sqlite store path")
 	dir := fs.String("dir", "", "nv-sae run directory (result.json, scored.safetensors, records.jsonl, names.json)")
 	strip := fs.String("strip", "", "prefix removed from record source paths to get pravda session paths")
-	layer := fs.Int("layer", 19, "capture layer recorded with the encoder")
+	model := fs.String("model", "", "capture model for a legacy result.json that names none (default "+sae.LegacyModel+"); must agree with result.json otherwise")
+	layer := fs.Int("layer", 0, "capture layer for a legacy result.json that names none (default 19); must agree with result.json otherwise")
 	label := fs.String("label", "", "label for this encoder, e.g. daily-20260912")
 	current := fs.Bool("current", false, "make this encoder the one pravda tags with (default when no label is given)")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -49,7 +50,7 @@ func runSae(ctx context.Context, args []string) error {
 		return err
 	}
 	defer st.Close()
-	n, err := sae.ImportWith(ctx, st.DB(), *dir, sae.ImportOptions{StripPrefix: *strip, Layer: *layer, Label: *label, Promote: *current || *label == ""})
+	n, err := sae.ImportWith(ctx, st.DB(), *dir, sae.ImportOptions{StripPrefix: *strip, Model: *model, Layer: *layer, Label: *label, Promote: *current || *label == ""})
 	if err != nil {
 		return err
 	}
@@ -63,7 +64,8 @@ func runSaePush(args []string) error {
 	token := fs.String("token", "", "bearer token (push token is enough)")
 	dir := fs.String("dir", "", "nv-sae run directory")
 	strip := fs.String("strip", "", "prefix removed from record source paths")
-	layer := fs.Int("layer", 19, "capture layer")
+	model := fs.String("model", "", "capture model for a legacy result.json (see sae import)")
+	layer := fs.Int("layer", 0, "capture layer for a legacy result.json (see sae import)")
 	label := fs.String("label", "", "encoder label")
 	current := fs.Bool("current", false, "promote to the tagging encoder")
 	if err := fs.Parse(args); err != nil {
@@ -98,7 +100,10 @@ func runSaePush(args []string) error {
 		}
 	}
 	_ = mw.WriteField("strip", *strip)
-	_ = mw.WriteField("layer", strconv.Itoa(*layer))
+	_ = mw.WriteField("model", *model)
+	if *layer != 0 {
+		_ = mw.WriteField("layer", strconv.Itoa(*layer))
+	}
 	_ = mw.WriteField("label", *label)
 	if *current || *label == "" {
 		_ = mw.WriteField("current", "1")

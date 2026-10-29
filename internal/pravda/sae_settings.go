@@ -22,6 +22,7 @@ type saeDictionary struct {
 	Current   bool   `json:"current"`
 	TopK      int    `json:"top_k"`
 	Layer     int    `json:"layer"`
+	Model     string `json:"model"`
 }
 type saeCatalogFeature struct {
 	ID          int    `json:"id"`
@@ -133,7 +134,7 @@ func (s *WatchServer) saeDataWithCounts(ctx context.Context, enc string, sess *S
 		if name == "" {
 			name = "weekly"
 		}
-		d := saeDictionary{ID: e.Encoder, Name: name, Features: e.Width, CreatedAt: e.ImportedAt.UTC().Format(time.RFC3339), Current: e.Current, TopK: e.TopK, Layer: e.Layer}
+		d := saeDictionary{ID: e.Encoder, Name: name, Features: e.Width, CreatedAt: e.ImportedAt.UTC().Format(time.RFC3339), Current: e.Current, TopK: e.TopK, Layer: e.Layer, Model: e.Model}
 		if e.Records >= 0 {
 			n := e.Records
 			d.Records = &n

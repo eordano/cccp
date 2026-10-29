@@ -49,10 +49,10 @@ func tinySafetensors(t *testing.T, n, k, width int) []byte {
 }
 
 func TestSaeImportGzipStoresPage(t *testing.T) {
-	s, _, h := newTestServer(t, "tok")
+	s, _, _ := newTestServer(t, "tok")
 	s.PushToken = "push"
 	s.SaeDir = t.TempDir()
-	h = s.Routes()
+	h := s.Routes()
 
 	var body bytes.Buffer
 	zw := gzip.NewWriter(&body)
@@ -84,6 +84,11 @@ func TestSaeImportGzipStoresPage(t *testing.T) {
 	}
 	if rec.Body.String() != "{\"imported\":2}\n" {
 		t.Fatalf("body: %q", rec.Body.String())
+	}
+	var model string
+	var layer int
+	if err := s.Store.DB().QueryRow(`SELECT model, layer FROM sae_encoders WHERE encoder='encT'`).Scan(&model, &layer); err != nil || model != "poolside/Laguna-XS-2.1-NVFP4" || layer != 19 {
+		t.Fatalf("legacy import identity: %q %d %v", model, layer, err)
 	}
 	gz := filepath.Join(s.SaeDir, "daily-20260901", "sessions.html.gz")
 	f, err := os.Open(gz)
