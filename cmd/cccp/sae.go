@@ -62,7 +62,7 @@ func runSaePush(args []string) error {
 	fs := flag.NewFlagSet("sae push", flag.ExitOnError)
 	url := fs.String("url", "", "cccp server URL")
 	token := fs.String("token", "", "bearer token (push token is enough)")
-	dir := fs.String("dir", "", "nv-sae run directory")
+	dir := fs.String("dir", "", "nv-sae run directory; its sae.safetensors, when present, is installed for on-demand scoring")
 	strip := fs.String("strip", "", "prefix removed from record source paths")
 	model := fs.String("model", "", "capture model for a legacy result.json (see sae import)")
 	layer := fs.Int("layer", 0, "capture layer for a legacy result.json (see sae import)")
@@ -77,10 +77,10 @@ func runSaePush(args []string) error {
 	var body bytes.Buffer
 	zw := gzip.NewWriter(&body)
 	mw := multipart.NewWriter(zw)
-	for _, name := range []string{"result.json", "scored.safetensors", "records.jsonl", "names.json", "sessions.html"} {
+	for _, name := range []string{"result.json", "scored.safetensors", "records.jsonl", "names.json", "sessions.html", "sae.safetensors"} {
 		f, err := os.Open(filepath.Join(*dir, name))
 		if err != nil {
-			if name == "names.json" || name == "sessions.html" {
+			if name == "names.json" || name == "sessions.html" || name == "sae.safetensors" {
 				continue
 			}
 			return err

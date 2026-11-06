@@ -570,6 +570,16 @@ Config tests use `isolateEnv(t)` - any new env-touching test must too.
   501, or a reply naming another model or hidden size. Those messages are
   built from dictionary metadata and sanitized model ids only, never request
   text, because job errors are durable and logged.
+- `/sae/import` installs the `sae.safetensors` a push carries into
+  `--sae-models-dir` (`sae.InstallWeights`) before importing, and refuses the
+  whole import (400) when the weights do not hash to `encoder_sha256`. The
+  scale it installs is the pushed `scored.safetensors`'s, and only the first
+  install of a dictionary counts: `nv-sae score` recomputes `scale` from the
+  records it scored, so a nightly re-score of an older dictionary must never
+  replace the training run's. Until 2026-11 nothing installed weights, and
+  every pipeline dictionary was invisible to on-demand scoring
+  (`Supports` false). The push token can install weights for a new encoder id,
+  as it can already import one; the weights are only parsed as float tensors.
 - SAE feedback: a message's vote is the sign of the sum of its `feedback`
   rows (the same text can be voted in several sessions), counted per
   dictionary by joining to that encoder's own `sae_records` and walking the

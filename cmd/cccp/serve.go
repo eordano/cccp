@@ -73,15 +73,16 @@ func runServe(ctx context.Context, args []string) error {
 	}
 
 	srv := &api.Server{
-		Store:     st,
-		Token:     cfg.Token,
-		PushToken: cfg.PushToken,
-		ReadToken: readToken,
-		Log:       logger,
-		Events:    events,
-		Watch:     watchSrv.Routes(),
-		SaeDir:    *saeDir,
-		Precheck:  *precheck,
+		Store:        st,
+		Token:        cfg.Token,
+		PushToken:    cfg.PushToken,
+		ReadToken:    readToken,
+		Log:          logger,
+		Events:       events,
+		Watch:        watchSrv.Routes(),
+		SaeDir:       *saeDir,
+		SaeModelsDir: *saeModelsDir,
+		Precheck:     *precheck,
 	}
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,

@@ -44,7 +44,7 @@ in
     saeModelsDir = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
-      description = "Directory of SAE weights and original calibration, keyed by encoder SHA256.";
+      description = "Directory of SAE weights and original calibration, keyed by encoder SHA256; an import that carries sae.safetensors installs into it.";
     };
 
     reviewPrecheck = lib.mkOption {
@@ -142,7 +142,9 @@ in
 
         NoNewPrivileges = true;
         ProtectSystem = "strict";
-        ReadWritePaths = lib.optional (cfg.saeDir != null) cfg.saeDir;
+        ReadWritePaths =
+          lib.optional (cfg.saeDir != null) cfg.saeDir
+          ++ lib.optional (cfg.saeModelsDir != null) cfg.saeModelsDir;
         ProtectHome = true;
         PrivateTmp = true;
         PrivateDevices = true;

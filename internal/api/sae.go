@@ -2,6 +2,7 @@ package api
 
 import (
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -77,6 +78,18 @@ func (s *Server) handleSaeImport(w http.ResponseWriter, r *http.Request) {
 	if label != "" && !saeLabelRe.MatchString(label) {
 		http.Error(w, "bad label", http.StatusBadRequest)
 		return
+	}
+	if weights, _, err := r.FormFile("sae.safetensors"); err == nil && s.SaeModelsDir != "" {
+		_, err := sae.InstallWeights(s.SaeModelsDir, dir, weights)
+		weights.Close()
+		if errors.Is(err, sae.ErrWeightsMismatch) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err != nil {
+			http.Error(w, "sae.safetensors: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	n, err := sae.ImportWith(r.Context(), s.Store.DB(), dir, sae.ImportOptions{StripPrefix: r.FormValue("strip"), Model: r.FormValue("model"), Layer: layer, Label: label, Promote: r.FormValue("current") == "1" || label == ""})
 	if err != nil {

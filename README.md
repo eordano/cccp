@@ -71,9 +71,14 @@ To enable scoring, pass `--sae-capture-url http://HOST:PORT` and
 `services.cccp.saeCaptureURL` and `saeModelsDir`). Each dictionary needs
 `models/ENCODER_SHA256/sae.safetensors` and its original `scored.safetensors`
 or a `scale.safetensors` containing the original `scale` tensor. The worker
-verifies the weights' SHA256 and preserves the dictionary's original scaling;
-new dictionaries need their matching files installed before on-demand scoring
-is available. The worker calls the capture service's `POST /v1/capture` with
+verifies the weights' SHA256 and preserves the dictionary's original scaling.
+`cccp sae push` sends the run directory's `sae.safetensors` when it has one (an
+`nv-sae train` run does; an `nv-sae score` run does not), and a server with a
+models directory checks it against `encoder_sha256` and installs it with the
+run's `scale` as `scale.safetensors`. The first install of a dictionary stays:
+a later scoring run recomputes `scale` from its own records. Dictionaries
+imported any other way need their files installed by hand before on-demand
+scoring is available. The worker calls the capture service's `POST /v1/capture` with
 the dictionary's model and layer (falling back to `/v1/laguna/capture` on an
 engine without that route) and checks that the reply names the same model,
 layer and the dictionary's hidden size. A dictionary whose model the engine

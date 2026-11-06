@@ -38,7 +38,10 @@ type Server struct {
 	Events    *Broadcaster
 	Watch     http.Handler
 	SaeDir    string
-	Precheck  string
+	// SaeModelsDir receives the weights an import carries (sae.safetensors),
+	// where on-demand scoring looks for them.
+	SaeModelsDir string
+	Precheck     string
 }
 
 func (s *Server) Routes() http.Handler {

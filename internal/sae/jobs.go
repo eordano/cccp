@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -62,17 +61,7 @@ func NewOnDemand(ix *Index, cfg ScorerConfig) (*OnDemand, error) {
 	return &OnDemand{ix: ix, cfg: cfg, client: cfg.HTTPClient, wake: make(chan struct{}, 1)}, nil
 }
 func (o *OnDemand) Supports(encoder string) bool {
-	if !safeEncoderID(encoder) {
-		return false
-	}
-	dir := filepath.Join(o.cfg.ModelsDir, encoder)
-	for _, p := range []string{filepath.Join(dir, "sae.safetensors"), scalePath(dir)} {
-		f, err := os.Stat(p)
-		if err != nil || !f.Mode().IsRegular() {
-			return false
-		}
-	}
-	return true
+	return safeEncoderID(encoder) && installed(filepath.Join(o.cfg.ModelsDir, encoder))
 }
 func (o *OnDemand) signal() {
 	select {
